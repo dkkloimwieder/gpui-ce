@@ -15,6 +15,14 @@ autoexamples = false
 
 [features]
 default = ["font-kit", "wayland", "x11", "windows-manifest"]
+# WASM/browser target - use with --no-default-features --features wasm
+wasm = [
+    "wasm-bindgen",
+    "wasm-bindgen-futures",
+    "web-sys",
+    "js-sys",
+    "getrandom",
+]
 test-support = [
     "leak-detection",
     "collections/test-support",
@@ -101,10 +109,8 @@ http_client = { package = "gpui_http_client", version = "0.2.2" }
 image = "0.25.1"
 inventory = "0.3.19"
 itertools = "0.14.0"
-libc = "0.2"
 log = { version = "0.4.16", features = ["kv_unstable_serde", "serde"] }
 lyon = "1.0"
-num_cpus = "1.13"
 parking = "2.0.0"
 parking_lot = "0.12.1"
 pin-project = "1.1.10"
@@ -125,7 +131,6 @@ serde = { version = "1.0.221", features = ["derive", "rc"] }
 serde_json = { version = "1.0.144", features = ["preserve_order", "raw_value"] }
 slotmap = "1.0.6"
 smallvec = { version = "1.6", features = ["union"] }
-smol = "2.0"
 spin = "0.10.0"
 stacksafe = "0.1"
 strum = { version = "0.27.2", features = ["derive"] }
@@ -277,6 +282,47 @@ windows = { version = "0.61", features = [
 windows-core = "0.61"
 windows-numerics = "0.2"
 windows-registry = "0.5"
+
+# ============================================================================
+# Native-only Dependencies (excluded from WASM)
+# ============================================================================
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+libc = "0.2"
+num_cpus = "1.13"
+smol = "2.0"
+
+# ============================================================================
+# WASM/Browser Dependencies
+# ============================================================================
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = { version = "0.2", optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+web-sys = { version = "0.3", optional = true, features = [
+    "Window",
+    "Document",
+    "Element",
+    "HtmlCanvasElement",
+    "Performance",
+    "Navigator",
+    "Clipboard",
+    "CssStyleDeclaration",
+    "KeyboardEvent",
+    "MouseEvent",
+    "WheelEvent",
+    "FocusEvent",
+    "PointerEvent",
+    "TouchEvent",
+    "DomRect",
+    "MediaQueryList",
+] }
+js-sys = { version = "0.3", optional = true }
+getrandom = { version = "0.2", features = ["js"], optional = true }
+# console_error_panic_hook for better panic messages in browser
+console_error_panic_hook = "0.1"
+# console_log for log output in browser
+console_log = "1"
 
 [dev-dependencies]
 backtrace = "0.3"
