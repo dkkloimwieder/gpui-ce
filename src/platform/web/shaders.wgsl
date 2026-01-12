@@ -258,3 +258,143 @@ fn fs_quad(input: QuadVarying) -> @location(0) vec4<f32> {
 
     return blend_color(color, saturate(antialias_threshold - outer_sdf));
 }
+
+// === Atlas Types === //
+
+struct AtlasTextureId {
+    index: u32,
+    kind: u32,
+}
+
+struct AtlasBounds {
+    origin: vec2<i32>,
+    size: vec2<i32>,
+}
+
+struct AtlasTile {
+    texture_id: AtlasTextureId,
+    tile_id: u32,
+    padding: u32,
+    bounds: AtlasBounds,
+}
+
+// Sprite texture and sampler
+var t_sprite: texture_2d<f32>;
+var s_sprite: sampler;
+
+fn to_tile_position(unit_vertex: vec2<f32>, tile: AtlasTile) -> vec2<f32> {
+    let atlas_size = vec2<f32>(textureDimensions(t_sprite, 0));
+    return (vec2<f32>(tile.bounds.origin) + unit_vertex * vec2<f32>(tile.bounds.size)) / atlas_size;
+}
+
+// === Transformation Matrix === //
+
+struct TransformationMatrix {
+    rotation_scale: mat2x2<f32>,
+    translation: vec2<f32>,
+}
+
+// === Monochrome Sprite Shader === //
+
+struct MonochromeSprite {
+    order: u32,
+    pad: u32,
+    bounds: Bounds,
+    content_mask: Bounds,
+    color: Hsla,
+    tile: AtlasTile,
+    transformation: TransformationMatrix,
+}
+
+var<storage, read> b_mono_sprites: array<MonochromeSprite>;
+
+struct MonoSpriteVarying {
+    @builtin(position) position: vec4<f32>,
+    @location(0) tile_position: vec2<f32>,
+    @location(1) @interpolate(flat) color: vec4<f32>,
+    @location(2) clip_distances: vec4<f32>,
+}
+
+@vertex
+fn vs_mono_sprite(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) instance_id: u32) -> MonoSpriteVarying {
+    let unit_vertex = vec2<f32>(f32(vertex_id & 1u), 0.5 * f32(vertex_id & 2u));
+    let sprite = b_mono_sprites[instance_id];
+
+    var out = MonoSpriteVarying();
+    out.position = to_device_position(unit_vertex, sprite.bounds);
+    out.tile_position = to_tile_position(unit_vertex, sprite.tile);
+    out.color = hsla_to_rgba(sprite.color);
+    out.clip_distances = distance_from_clip_rect(unit_vertex, sprite.bounds, sprite.content_mask);
+    return out;
+}
+
+@fragment
+fn fs_mono_sprite(input: MonoSpriteVarying) -> @location(0) vec4<f32> {
+    // Alpha clip first
+    if (any(input.clip_distances < vec4<f32>(0.0))) {
+        return vec4<f32>(0.0);
+    }
+
+    // Sample grayscale value from atlas
+    let sample = textureSample(t_sprite, s_sprite, input.tile_position).r;
+
+    // Apply color tint
+    return blend_color(input.color, sample * input.color.a);
+}
+
+// === Polychrome Sprite Shader === //
+
+struct PolychromeSprite {
+    order: u32,
+    pad: u32,
+    grayscale: u32,
+    opacity: f32,
+    bounds: Bounds,
+    content_mask: Bounds,
+    corner_radii: Corners,
+    tile: AtlasTile,
+}
+
+var<storage, read> b_poly_sprites: array<PolychromeSprite>;
+
+struct PolySpriteVarying {
+    @builtin(position) position: vec4<f32>,
+    @location(0) tile_position: vec2<f32>,
+    @location(1) @interpolate(flat) sprite_id: u32,
+    @location(2) clip_distances: vec4<f32>,
+}
+
+@vertex
+fn vs_poly_sprite(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) instance_id: u32) -> PolySpriteVarying {
+    let unit_vertex = vec2<f32>(f32(vertex_id & 1u), 0.5 * f32(vertex_id & 2u));
+    let sprite = b_poly_sprites[instance_id];
+
+    var out = PolySpriteVarying();
+    out.position = to_device_position(unit_vertex, sprite.bounds);
+    out.tile_position = to_tile_position(unit_vertex, sprite.tile);
+    out.sprite_id = instance_id;
+    out.clip_distances = distance_from_clip_rect(unit_vertex, sprite.bounds, sprite.content_mask);
+    return out;
+}
+
+const GRAYSCALE_FACTORS: vec3<f32> = vec3<f32>(0.2126, 0.7152, 0.0722);
+
+@fragment
+fn fs_poly_sprite(input: PolySpriteVarying) -> @location(0) vec4<f32> {
+    // Alpha clip first
+    if (any(input.clip_distances < vec4<f32>(0.0))) {
+        return vec4<f32>(0.0);
+    }
+
+    let sample = textureSample(t_sprite, s_sprite, input.tile_position);
+    let sprite = b_poly_sprites[input.sprite_id];
+
+    var color = sample;
+    // Apply grayscale if requested
+    if ((sprite.grayscale & 0xFFu) != 0u) {
+        let grayscale = dot(color.rgb, GRAYSCALE_FACTORS);
+        color = vec4<f32>(vec3<f32>(grayscale), sample.a);
+    }
+
+    return blend_color(color, sprite.opacity);
+}

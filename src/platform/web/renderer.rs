@@ -18,7 +18,10 @@ use blade_graphics as gpu;
 use std::{mem, ptr};
 
 #[cfg(target_arch = "wasm32")]
-use crate::scene::Quad;
+use crate::scene::{Quad, MonochromeSprite, PolychromeSprite};
+
+#[cfg(target_arch = "wasm32")]
+use super::web_atlas::WebGpuAtlas;
 
 /// Shader data layout for quad rendering
 #[cfg(target_arch = "wasm32")]
@@ -28,9 +31,33 @@ struct ShaderQuadsData {
     b_quads: gpu::BufferPiece,
 }
 
+/// Shader data layout for monochrome sprite rendering
+#[cfg(target_arch = "wasm32")]
+#[derive(blade_macros::ShaderData)]
+struct ShaderMonoSpritesData {
+    globals: GlobalParams,
+    t_sprite: gpu::TextureView,
+    s_sprite: gpu::Sampler,
+    b_mono_sprites: gpu::BufferPiece,
+}
+
+/// Shader data layout for polychrome sprite rendering
+#[cfg(target_arch = "wasm32")]
+#[derive(blade_macros::ShaderData)]
+struct ShaderPolySpritesData {
+    globals: GlobalParams,
+    t_sprite: gpu::TextureView,
+    s_sprite: gpu::Sampler,
+    b_poly_sprites: gpu::BufferPiece,
+}
+
 /// Maximum number of quads per batch
 #[cfg(target_arch = "wasm32")]
 const MAX_QUADS_PER_BATCH: usize = 4096;
+
+/// Maximum number of sprites per batch
+#[cfg(target_arch = "wasm32")]
+const MAX_SPRITES_PER_BATCH: usize = 4096;
 
 /// Global parameters passed to all shaders.
 ///
@@ -86,8 +113,8 @@ impl Default for WebSurfaceConfig {
 
 /// Web renderer state - not Send/Sync since WASM is single-threaded
 pub struct WebRendererState {
-    /// GPU context
-    pub gpu: gpu::Context,
+    /// GPU context (shared via Rc for atlas)
+    pub gpu: Rc<gpu::Context>,
     /// Rendering surface
     pub surface: gpu::Surface,
     /// Surface configuration
@@ -106,6 +133,18 @@ pub struct WebRendererState {
     pub quad_pipeline: gpu::RenderPipeline,
     /// Buffer for quad instance data
     pub quad_buffer: gpu::Buffer,
+    /// Monochrome sprite render pipeline
+    pub mono_sprite_pipeline: gpu::RenderPipeline,
+    /// Buffer for monochrome sprite instance data
+    pub mono_sprite_buffer: gpu::Buffer,
+    /// Polychrome sprite render pipeline
+    pub poly_sprite_pipeline: gpu::RenderPipeline,
+    /// Buffer for polychrome sprite instance data
+    pub poly_sprite_buffer: gpu::Buffer,
+    /// Sampler for atlas textures
+    pub atlas_sampler: gpu::Sampler,
+    /// Texture atlas for sprites/glyphs
+    pub atlas: WebGpuAtlas,
 }
 
 /// Web renderer for GPUI
@@ -148,14 +187,14 @@ impl WebRenderer {
         canvas: web_sys::HtmlCanvasElement,
         config: WebSurfaceConfig,
     ) -> anyhow::Result<()> {
-        // Create GPU context asynchronously
-        let gpu = gpu::Context::init_async(gpu::ContextDesc {
+        // Create GPU context asynchronously (wrapped in Rc for sharing with atlas)
+        let gpu = Rc::new(gpu::Context::init_async(gpu::ContextDesc {
             presentation: true,
             validation: cfg!(debug_assertions),
             ..Default::default()
         })
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to create GPU context: {:?}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to create GPU context: {:?}", e))?);
 
         // Create surface from canvas
         let mut surface = gpu
@@ -249,6 +288,75 @@ impl WebRenderer {
             memory: gpu::Memory::Shared,
         });
 
+        // Create atlas sampler for sprite rendering
+        let atlas_sampler = gpu.create_sampler(gpu::SamplerDesc {
+            name: "atlas",
+            address_modes: [gpu::AddressMode::ClampToEdge; 3],
+            mag_filter: gpu::FilterMode::Linear,
+            min_filter: gpu::FilterMode::Linear,
+            mipmap_filter: gpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+
+        // Create monochrome sprite render pipeline
+        let mono_sprite_layout = <ShaderMonoSpritesData as gpu::ShaderData>::layout();
+        let mono_sprite_pipeline = gpu.create_render_pipeline(gpu::RenderPipelineDesc {
+            name: "mono_sprites",
+            data_layouts: &[&mono_sprite_layout],
+            vertex: shader.at("vs_mono_sprite"),
+            vertex_fetches: &[],
+            fragment: Some(shader.at("fs_mono_sprite")),
+            primitive: gpu::PrimitiveState {
+                topology: gpu::PrimitiveTopology::TriangleStrip,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            color_targets: &[gpu::ColorTargetState {
+                format: surface.info().format,
+                blend: Some(gpu::BlendState::ALPHA_BLENDING),
+                write_mask: gpu::ColorWrites::ALL,
+            }],
+            multisample_state: gpu::MultisampleState::default(),
+        });
+
+        // Create monochrome sprite instance buffer
+        let mono_sprite_buffer = gpu.create_buffer(gpu::BufferDesc {
+            name: "mono_sprites",
+            size: (mem::size_of::<MonochromeSprite>() * MAX_SPRITES_PER_BATCH) as u64,
+            memory: gpu::Memory::Shared,
+        });
+
+        // Create polychrome sprite render pipeline
+        let poly_sprite_layout = <ShaderPolySpritesData as gpu::ShaderData>::layout();
+        let poly_sprite_pipeline = gpu.create_render_pipeline(gpu::RenderPipelineDesc {
+            name: "poly_sprites",
+            data_layouts: &[&poly_sprite_layout],
+            vertex: shader.at("vs_poly_sprite"),
+            vertex_fetches: &[],
+            fragment: Some(shader.at("fs_poly_sprite")),
+            primitive: gpu::PrimitiveState {
+                topology: gpu::PrimitiveTopology::TriangleStrip,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            color_targets: &[gpu::ColorTargetState {
+                format: surface.info().format,
+                blend: Some(gpu::BlendState::ALPHA_BLENDING),
+                write_mask: gpu::ColorWrites::ALL,
+            }],
+            multisample_state: gpu::MultisampleState::default(),
+        });
+
+        // Create polychrome sprite instance buffer
+        let poly_sprite_buffer = gpu.create_buffer(gpu::BufferDesc {
+            name: "poly_sprites",
+            size: (mem::size_of::<PolychromeSprite>() * MAX_SPRITES_PER_BATCH) as u64,
+            memory: gpu::Memory::Shared,
+        });
+
+        // Create texture atlas for sprites and glyphs
+        let atlas = WebGpuAtlas::new(&gpu);
+
         *self.0.borrow_mut() = Some(WebRendererState {
             gpu,
             surface,
@@ -260,6 +368,12 @@ impl WebRenderer {
             globals_buffer,
             quad_pipeline,
             quad_buffer,
+            mono_sprite_pipeline,
+            mono_sprite_buffer,
+            poly_sprite_pipeline,
+            poly_sprite_buffer,
+            atlas_sampler,
+            atlas,
         });
 
         Ok(())
@@ -314,6 +428,9 @@ impl WebRenderer {
             let _ = state.gpu.wait_for(sp, 1000);
         }
 
+        // Flush any pending atlas uploads
+        state.atlas.flush_uploads();
+
         // Acquire frame
         let frame = state.surface.acquire_frame();
         if !frame.is_valid() {
@@ -352,7 +469,35 @@ impl WebRenderer {
                             &state.gpu,
                         );
                     }
-                    // TODO: Other primitive types
+                    PrimitiveBatch::MonochromeSprites { texture_id, sprites } => {
+                        if let Some(tex_info) = state.atlas.get_texture_info(texture_id) {
+                            Self::draw_mono_sprites_internal(
+                                &mut pass,
+                                sprites,
+                                &state.globals,
+                                tex_info.view,
+                                state.atlas_sampler,
+                                state.mono_sprite_buffer,
+                                &state.mono_sprite_pipeline,
+                                &state.gpu,
+                            );
+                        }
+                    }
+                    PrimitiveBatch::PolychromeSprites { texture_id, sprites } => {
+                        if let Some(tex_info) = state.atlas.get_texture_info(texture_id) {
+                            Self::draw_poly_sprites_internal(
+                                &mut pass,
+                                sprites,
+                                &state.globals,
+                                tex_info.view,
+                                state.atlas_sampler,
+                                state.poly_sprite_buffer,
+                                &state.poly_sprite_pipeline,
+                                &state.gpu,
+                            );
+                        }
+                    }
+                    // TODO: Other primitive types (shadows, paths, underlines, surfaces)
                     _ => {}
                 }
             }
@@ -407,6 +552,100 @@ impl WebRenderer {
         );
 
         // Draw instanced quads (4 vertices per quad, N instances)
+        encoder.draw(0, 4, 0, count as u32);
+    }
+
+    /// Internal helper to draw monochrome sprites during a render pass
+    #[cfg(target_arch = "wasm32")]
+    fn draw_mono_sprites_internal(
+        pass: &mut gpu::RenderCommandEncoder,
+        sprites: &[MonochromeSprite],
+        globals: &GlobalParams,
+        texture_view: gpu::TextureView,
+        sampler: gpu::Sampler,
+        sprite_buffer: gpu::Buffer,
+        pipeline: &gpu::RenderPipeline,
+        gpu: &Rc<gpu::Context>,
+    ) {
+        if sprites.is_empty() {
+            return;
+        }
+
+        let count = sprites.len().min(MAX_SPRITES_PER_BATCH);
+
+        // Upload sprite data to buffer
+        unsafe {
+            ptr::copy_nonoverlapping(
+                sprites.as_ptr(),
+                sprite_buffer.data() as *mut MonochromeSprite,
+                count,
+            );
+        }
+        gpu.sync_buffer(sprite_buffer);
+
+        // Bind pipeline and data
+        let mut encoder = pass.with(pipeline);
+        encoder.bind(
+            0,
+            &ShaderMonoSpritesData {
+                globals: *globals,
+                t_sprite: texture_view,
+                s_sprite: sampler,
+                b_mono_sprites: gpu::BufferPiece {
+                    buffer: sprite_buffer,
+                    offset: 0,
+                },
+            },
+        );
+
+        // Draw instanced sprites (4 vertices per sprite, N instances)
+        encoder.draw(0, 4, 0, count as u32);
+    }
+
+    /// Internal helper to draw polychrome sprites during a render pass
+    #[cfg(target_arch = "wasm32")]
+    fn draw_poly_sprites_internal(
+        pass: &mut gpu::RenderCommandEncoder,
+        sprites: &[PolychromeSprite],
+        globals: &GlobalParams,
+        texture_view: gpu::TextureView,
+        sampler: gpu::Sampler,
+        sprite_buffer: gpu::Buffer,
+        pipeline: &gpu::RenderPipeline,
+        gpu: &Rc<gpu::Context>,
+    ) {
+        if sprites.is_empty() {
+            return;
+        }
+
+        let count = sprites.len().min(MAX_SPRITES_PER_BATCH);
+
+        // Upload sprite data to buffer
+        unsafe {
+            ptr::copy_nonoverlapping(
+                sprites.as_ptr(),
+                sprite_buffer.data() as *mut PolychromeSprite,
+                count,
+            );
+        }
+        gpu.sync_buffer(sprite_buffer);
+
+        // Bind pipeline and data
+        let mut encoder = pass.with(pipeline);
+        encoder.bind(
+            0,
+            &ShaderPolySpritesData {
+                globals: *globals,
+                t_sprite: texture_view,
+                s_sprite: sampler,
+                b_poly_sprites: gpu::BufferPiece {
+                    buffer: sprite_buffer,
+                    offset: 0,
+                },
+            },
+        );
+
+        // Draw instanced sprites (4 vertices per sprite, N instances)
         encoder.draw(0, 4, 0, count as u32);
     }
 
@@ -665,6 +904,19 @@ impl WebRenderer {
             buffer: s.globals_buffer,
             offset: 0,
         })
+    }
+
+    /// Get access to the texture atlas for sprite/glyph rendering
+    ///
+    /// Returns None if the renderer hasn't been initialized yet.
+    #[cfg(target_arch = "wasm32")]
+    pub fn atlas(&self) -> Option<impl std::ops::Deref<Target = WebGpuAtlas> + '_> {
+        let state = self.0.borrow();
+        if state.is_some() {
+            Some(std::cell::Ref::map(state, |s| &s.as_ref().unwrap().atlas))
+        } else {
+            None
+        }
     }
 }
 
