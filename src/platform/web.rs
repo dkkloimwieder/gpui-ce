@@ -5,6 +5,7 @@
 
 mod dispatcher;
 pub(crate) mod events;
+pub(crate) mod event_listeners;
 mod platform;
 mod renderer;
 mod window;
