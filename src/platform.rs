@@ -23,6 +23,9 @@ mod test;
 #[cfg(target_os = "windows")]
 mod windows;
 
+#[cfg(target_arch = "wasm32")]
+mod web;
+
 #[cfg(all(
     feature = "screen-capture",
     any(
@@ -81,6 +84,9 @@ pub(crate) use mac::*;
 pub(crate) use test::*;
 #[cfg(target_os = "windows")]
 pub(crate) use windows::*;
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) use web::*;
 
 #[cfg(all(target_os = "linux", feature = "wayland"))]
 pub use linux::layer_shell;
