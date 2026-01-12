@@ -24,6 +24,7 @@ wasm = [
     "js-sys",
     "getrandom",
     "blade-graphics",
+    "blade-macros",
     "bytemuck",
 ]
 test-support = [

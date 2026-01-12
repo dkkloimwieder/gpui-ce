@@ -43,7 +43,7 @@ const MAX_QUADS_PER_BATCH: usize = 4096;
 /// }
 /// ```
 #[repr(C)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GlobalParams {
     /// Viewport size in pixels
     pub viewport_size: [f32; 2],
@@ -540,8 +540,8 @@ impl WebRenderer {
     /// Color is specified as (h, s, l, a) where h is 0-1, s is 0-1, l is 0-1, a is 0-1.
     #[cfg(target_arch = "wasm32")]
     pub fn draw_test_quad(&self, x: f32, y: f32, w: f32, h: f32, color: [f32; 4]) {
-        use crate::scene::{Background, BorderStyle, Bounds, ContentMask, Corners, DrawOrder, Edges, Hsla};
-        use crate::ScaledPixels;
+        use crate::{Background, Bounds, ContentMask, Corners, Edges, Hsla, ScaledPixels};
+        use crate::scene::{BorderStyle, DrawOrder};
 
         let mut state_ref = self.0.borrow_mut();
         let Some(state) = state_ref.as_mut() else {
@@ -587,12 +587,12 @@ impl WebRenderer {
                     },
                 },
             },
-            background: Background::Solid(Hsla {
+            background: Hsla {
                 h: color[0],
                 s: color[1],
                 l: color[2],
                 a: color[3],
-            }),
+            }.into(),
             border_color: Hsla::default(),
             corner_radii: Corners::default(),
             border_widths: Edges::default(),
