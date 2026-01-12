@@ -22,6 +22,11 @@ use std::{
 };
 use uuid::Uuid;
 
+// Thread-local storage for the platform instance (WASM is single-threaded)
+thread_local! {
+    static PLATFORM: RefCell<Option<Rc<WebPlatform>>> = const { RefCell::new(None) };
+}
+
 /// Web platform implementation for WASM
 pub(crate) struct WebPlatform {
     background_executor: BackgroundExecutor,
@@ -312,6 +317,23 @@ impl PlatformKeyboardLayout for WebKeyboardLayout {
 }
 
 pub(crate) fn current_platform(_headless: bool) -> Rc<dyn Platform> {
-    // TODO: Create proper executors for WASM
-    unimplemented!("WebPlatform requires async initialization - use current_platform_async()")
+    PLATFORM.with(|platform| {
+        let mut platform_ref = platform.borrow_mut();
+        if let Some(ref existing) = *platform_ref {
+            return existing.clone() as Rc<dyn Platform>;
+        }
+
+        // Create the dispatcher
+        let dispatcher = Arc::new(WebDispatcher::new());
+
+        // Create executors from the dispatcher
+        let background_executor = BackgroundExecutor::new(dispatcher.clone());
+        let foreground_executor = ForegroundExecutor::new(dispatcher);
+
+        // Create and cache the platform
+        let web_platform = WebPlatform::new(background_executor, foreground_executor);
+        *platform_ref = Some(web_platform.clone());
+
+        web_platform as Rc<dyn Platform>
+    })
 }
