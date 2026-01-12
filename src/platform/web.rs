@@ -5,7 +5,7 @@
 
 mod dispatcher;
 pub(crate) mod events;
-pub(crate) mod event_listeners;
+pub mod event_listeners;
 mod platform;
 mod renderer;
 mod window;
@@ -15,7 +15,7 @@ pub(crate) use platform::current_platform;
 pub use platform::DEFAULT_CANVAS_ID;
 #[cfg(target_arch = "wasm32")]
 pub use platform::get_canvas_element;
-pub(crate) use renderer::WebRenderer;
+pub use renderer::{WebRenderer, WebSurfaceConfig};
 pub(crate) use window::WebWindow;
 
 /// Screen capture is not supported on WASM

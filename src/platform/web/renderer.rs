@@ -212,6 +212,62 @@ impl WebRenderer {
         // No-op on non-WASM
     }
 
+    /// Clear the screen to black
+    ///
+    /// This is useful for testing that WebGPU is working before full scene
+    /// rendering is implemented.
+    #[cfg(target_arch = "wasm32")]
+    pub fn clear(&self) {
+        let mut state_ref = self.0.borrow_mut();
+        let Some(state) = state_ref.as_mut() else {
+            log::warn!("WebRenderer::clear called before initialization");
+            return;
+        };
+
+        // Wait for previous frame
+        if let Some(ref sp) = state.last_sync_point {
+            let _ = state.gpu.wait_for(sp, 1000);
+        }
+
+        // Acquire frame
+        let frame = state.surface.acquire_frame();
+        if !frame.is_valid() {
+            log::warn!("Failed to acquire frame");
+            return;
+        }
+
+        // Begin encoding
+        state.command_encoder.start();
+
+        // Get the texture view for rendering
+        let target = frame.texture_view();
+
+        // Render pass to clear the screen to opaque black
+        {
+            let _pass = state.command_encoder.render("clear", gpu::RenderTargetSet {
+                colors: &[gpu::RenderTarget {
+                    view: target,
+                    init_op: gpu::InitOp::Clear(gpu::TextureColor::OpaqueBlack),
+                    finish_op: gpu::FinishOp::Store,
+                }],
+                depth_stencil: None,
+            });
+        }
+
+        // Queue frame for presentation
+        state.command_encoder.present(frame);
+
+        // Submit
+        let sync_point = state.gpu.submit(&mut state.command_encoder);
+        state.last_sync_point = Some(sync_point);
+    }
+
+    /// Clear the screen (non-WASM stub)
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn clear(&self) {
+        // No-op on non-WASM
+    }
+
     /// Get the current drawable size
     pub fn drawable_size(&self) -> Size<DevicePixels> {
         self.0

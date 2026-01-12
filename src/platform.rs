@@ -88,6 +88,16 @@ pub(crate) use windows::*;
 #[cfg(target_arch = "wasm32")]
 pub(crate) use web::*;
 
+// Re-export public web types for WASM applications
+#[cfg(target_arch = "wasm32")]
+pub use web::{
+    DEFAULT_CANVAS_ID,
+    WebRenderer,
+    WebSurfaceConfig,
+    event_listeners,
+    get_canvas_element,
+};
+
 #[cfg(all(target_os = "linux", feature = "wayland"))]
 pub use linux::layer_shell;
 
