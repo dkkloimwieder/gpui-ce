@@ -268,6 +268,67 @@ impl WebRenderer {
         // No-op on non-WASM
     }
 
+    /// Clear the screen with a color index (for testing color cycling)
+    ///
+    /// Index 0: Black, 1: White, 2: Transparent (shows HTML background), 3: Black again
+    #[cfg(target_arch = "wasm32")]
+    pub fn clear_with_index(&self, color_index: u32) {
+        let color = match color_index % 3 {
+            0 => gpu::TextureColor::OpaqueBlack,
+            1 => gpu::TextureColor::White,
+            _ => gpu::TextureColor::TransparentBlack,
+        };
+
+        let mut state_ref = self.0.borrow_mut();
+        let Some(state) = state_ref.as_mut() else {
+            log::warn!("WebRenderer::clear_with_index called before initialization");
+            return;
+        };
+
+        // Wait for previous frame
+        if let Some(ref sp) = state.last_sync_point {
+            let _ = state.gpu.wait_for(sp, 1000);
+        }
+
+        // Acquire frame
+        let frame = state.surface.acquire_frame();
+        if !frame.is_valid() {
+            log::warn!("Failed to acquire frame");
+            return;
+        }
+
+        // Begin encoding
+        state.command_encoder.start();
+
+        // Get the texture view for rendering
+        let target = frame.texture_view();
+
+        // Render pass to clear the screen
+        {
+            let _pass = state.command_encoder.render("clear", gpu::RenderTargetSet {
+                colors: &[gpu::RenderTarget {
+                    view: target,
+                    init_op: gpu::InitOp::Clear(color),
+                    finish_op: gpu::FinishOp::Store,
+                }],
+                depth_stencil: None,
+            });
+        }
+
+        // Queue frame for presentation
+        state.command_encoder.present(frame);
+
+        // Submit
+        let sync_point = state.gpu.submit(&mut state.command_encoder);
+        state.last_sync_point = Some(sync_point);
+    }
+
+    /// Clear the screen with color index (non-WASM stub)
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn clear_with_index(&self, _color_index: u32) {
+        // No-op on non-WASM
+    }
+
     /// Get the current drawable size
     pub fn drawable_size(&self) -> Size<DevicePixels> {
         self.0
