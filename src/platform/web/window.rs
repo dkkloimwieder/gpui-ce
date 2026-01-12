@@ -59,6 +59,12 @@ pub(crate) struct WebWindowState {
     pub(crate) mouse_position: Point<Pixels>,
     /// Current modifiers
     pub(crate) modifiers: Modifiers,
+    /// Last mouse down time for click counting
+    pub(crate) last_mouse_down_time: Option<f64>,
+    /// Last mouse down button
+    pub(crate) last_mouse_down_button: Option<i16>,
+    /// Current click count
+    pub(crate) click_count: usize,
 }
 
 /// Web window - wraps browser canvas element
@@ -103,6 +109,9 @@ impl WebWindow {
             is_fullscreen: false,
             mouse_position: point(px(0.0), px(0.0)),
             modifiers: Modifiers::default(),
+            last_mouse_down_time: None,
+            last_mouse_down_button: None,
+            click_count: 0,
         })))
     }
 
@@ -138,6 +147,227 @@ impl WebWindow {
                 force_render: false,
             });
             self.0.lock().request_frame_callback = Some(callback);
+        }
+    }
+
+    //=========================================================================
+    // Input Event Handling
+    //=========================================================================
+
+    /// Dispatch a PlatformInput event through the input callback
+    pub fn dispatch_input(&self, input: PlatformInput) -> crate::DispatchEventResult {
+        let mut state = self.0.lock();
+        if let Some(callback) = state.input_callback.take() {
+            drop(state);
+            let mut callback = callback;
+            let result = callback(input);
+            self.0.lock().input_callback = Some(callback);
+            result
+        } else {
+            crate::DispatchEventResult::default()
+        }
+    }
+
+    /// Handle browser mousedown event
+    #[cfg(target_arch = "wasm32")]
+    pub fn handle_mouse_down(&self, event: &web_sys::MouseEvent, now: f64) {
+        use super::events::{modifiers_from_mouse_event, mouse_button_from_browser};
+
+        let button = event.button();
+        let mut state = self.0.lock();
+
+        // Calculate click count (double-click detection)
+        // Double-click if same button within 500ms
+        const DOUBLE_CLICK_MS: f64 = 500.0;
+        if state.last_mouse_down_button == Some(button) {
+            if let Some(last_time) = state.last_mouse_down_time {
+                if now - last_time < DOUBLE_CLICK_MS {
+                    state.click_count += 1;
+                } else {
+                    state.click_count = 1;
+                }
+            } else {
+                state.click_count = 1;
+            }
+        } else {
+            state.click_count = 1;
+        }
+        state.last_mouse_down_time = Some(now);
+        state.last_mouse_down_button = Some(button);
+
+        let click_count = state.click_count;
+        state.mouse_position = point(px(event.offset_x() as f32), px(event.offset_y() as f32));
+        state.modifiers = modifiers_from_mouse_event(event);
+
+        drop(state);
+
+        let input = PlatformInput::MouseDown(crate::MouseDownEvent {
+            button: mouse_button_from_browser(button),
+            position: point(px(event.offset_x() as f32), px(event.offset_y() as f32)),
+            modifiers: modifiers_from_mouse_event(event),
+            click_count,
+            first_mouse: false,
+        });
+
+        self.dispatch_input(input);
+    }
+
+    /// Handle browser mouseup event
+    #[cfg(target_arch = "wasm32")]
+    pub fn handle_mouse_up(&self, event: &web_sys::MouseEvent) {
+        use super::events::{modifiers_from_mouse_event, mouse_button_from_browser};
+
+        let state = self.0.lock();
+        let click_count = state.click_count;
+        drop(state);
+
+        let input = PlatformInput::MouseUp(crate::MouseUpEvent {
+            button: mouse_button_from_browser(event.button()),
+            position: point(px(event.offset_x() as f32), px(event.offset_y() as f32)),
+            modifiers: modifiers_from_mouse_event(event),
+            click_count,
+        });
+
+        self.dispatch_input(input);
+    }
+
+    /// Handle browser mousemove event
+    #[cfg(target_arch = "wasm32")]
+    pub fn handle_mouse_move_event(&self, event: &web_sys::MouseEvent) {
+        use super::events::{modifiers_from_mouse_event, pressed_button_from_buttons};
+
+        let position = point(px(event.offset_x() as f32), px(event.offset_y() as f32));
+
+        {
+            let mut state = self.0.lock();
+            state.mouse_position = position;
+            state.modifiers = modifiers_from_mouse_event(event);
+        }
+
+        let input = PlatformInput::MouseMove(crate::MouseMoveEvent {
+            position,
+            pressed_button: pressed_button_from_buttons(event.buttons()),
+            modifiers: modifiers_from_mouse_event(event),
+        });
+
+        self.dispatch_input(input);
+    }
+
+    /// Handle browser wheel event
+    #[cfg(target_arch = "wasm32")]
+    pub fn handle_wheel(&self, event: &web_sys::WheelEvent) {
+        use super::events::scroll_wheel_from_browser;
+
+        let input = PlatformInput::ScrollWheel(scroll_wheel_from_browser(event));
+        self.dispatch_input(input);
+    }
+
+    /// Handle browser keydown event
+    #[cfg(target_arch = "wasm32")]
+    pub fn handle_key_down(&self, event: &web_sys::KeyboardEvent) {
+        use super::events::{is_modifier_key, key_down_from_browser, modifiers_changed_from_keyboard, modifiers_from_keyboard_event};
+
+        // Update modifiers
+        {
+            let mut state = self.0.lock();
+            state.modifiers = modifiers_from_keyboard_event(event);
+        }
+
+        // If this is a modifier key, send ModifiersChanged event
+        if is_modifier_key(event) {
+            let input = PlatformInput::ModifiersChanged(modifiers_changed_from_keyboard(event));
+            self.dispatch_input(input);
+        } else {
+            let input = PlatformInput::KeyDown(key_down_from_browser(event));
+            self.dispatch_input(input);
+        }
+    }
+
+    /// Handle browser keyup event
+    #[cfg(target_arch = "wasm32")]
+    pub fn handle_key_up(&self, event: &web_sys::KeyboardEvent) {
+        use super::events::{is_modifier_key, key_up_from_browser, modifiers_changed_from_keyboard, modifiers_from_keyboard_event};
+
+        // Update modifiers
+        {
+            let mut state = self.0.lock();
+            state.modifiers = modifiers_from_keyboard_event(event);
+        }
+
+        // If this is a modifier key, send ModifiersChanged event
+        if is_modifier_key(event) {
+            let input = PlatformInput::ModifiersChanged(modifiers_changed_from_keyboard(event));
+            self.dispatch_input(input);
+        } else {
+            let input = PlatformInput::KeyUp(key_up_from_browser(event));
+            self.dispatch_input(input);
+        }
+    }
+
+    /// Handle browser mouseenter event
+    #[cfg(target_arch = "wasm32")]
+    pub fn handle_mouse_enter(&self) {
+        let mut state = self.0.lock();
+        state.is_hovered = true;
+        if let Some(callback) = state.hover_status_change_callback.take() {
+            drop(state);
+            let mut callback = callback;
+            callback(true);
+            self.0.lock().hover_status_change_callback = Some(callback);
+        }
+    }
+
+    /// Handle browser mouseleave event
+    #[cfg(target_arch = "wasm32")]
+    pub fn handle_mouse_leave(&self, event: &web_sys::MouseEvent) {
+        use super::events::{modifiers_from_mouse_event, pressed_button_from_buttons};
+
+        {
+            let mut state = self.0.lock();
+            state.is_hovered = false;
+        }
+
+        // Send MouseExited event
+        let input = PlatformInput::MouseExited(crate::MouseExitEvent {
+            position: point(px(event.offset_x() as f32), px(event.offset_y() as f32)),
+            pressed_button: pressed_button_from_buttons(event.buttons()),
+            modifiers: modifiers_from_mouse_event(event),
+        });
+        self.dispatch_input(input);
+
+        // Call hover status callback
+        let mut state = self.0.lock();
+        if let Some(callback) = state.hover_status_change_callback.take() {
+            drop(state);
+            let mut callback = callback;
+            callback(false);
+            self.0.lock().hover_status_change_callback = Some(callback);
+        }
+    }
+
+    /// Handle browser focus event
+    #[cfg(target_arch = "wasm32")]
+    pub fn handle_focus(&self) {
+        let mut state = self.0.lock();
+        state.is_active = true;
+        if let Some(callback) = state.active_status_change_callback.take() {
+            drop(state);
+            let mut callback = callback;
+            callback(true);
+            self.0.lock().active_status_change_callback = Some(callback);
+        }
+    }
+
+    /// Handle browser blur event
+    #[cfg(target_arch = "wasm32")]
+    pub fn handle_blur(&self) {
+        let mut state = self.0.lock();
+        state.is_active = false;
+        if let Some(callback) = state.active_status_change_callback.take() {
+            drop(state);
+            let mut callback = callback;
+            callback(false);
+            self.0.lock().active_status_change_callback = Some(callback);
         }
     }
 }

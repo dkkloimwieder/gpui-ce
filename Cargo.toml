@@ -320,6 +320,10 @@ web-sys = { version = "0.3", optional = true, features = [
     "TouchEvent",
     "DomRect",
     "MediaQueryList",
+    # Event listener support
+    "Event",
+    "EventTarget",
+    "AddEventListenerOptions",
 ] }
 js-sys = { version = "0.3", optional = true }
 getrandom = { version = "0.2", features = ["js"], optional = true }

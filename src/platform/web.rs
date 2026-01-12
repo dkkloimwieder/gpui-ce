@@ -4,6 +4,7 @@
 //! and web APIs for windowing, events, and text.
 
 mod dispatcher;
+pub(crate) mod events;
 mod platform;
 mod renderer;
 mod window;
