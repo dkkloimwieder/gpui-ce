@@ -25,11 +25,14 @@ pub use async_context::*;
 use collections::{FxHashMap, FxHashSet, HashMap, VecDeque};
 pub use context::*;
 pub use entity_map::*;
-use http_client::{HttpClient, Url};
+#[cfg(not(target_arch = "wasm32"))]
+use http_client::{self, HttpClient, Url};
+#[cfg(target_arch = "wasm32")]
+use crate::http_stubs::{self as http_client, HttpClient, Url};
 use smallvec::SmallVec;
 #[cfg(any(test, feature = "test-support"))]
 pub use test_context::*;
-use util::{ResultExt, debug_panic};
+use crate::util::{ResultExt, debug_panic};
 
 #[cfg(any(feature = "inspector", debug_assertions))]
 use crate::InspectorElementRegistry;

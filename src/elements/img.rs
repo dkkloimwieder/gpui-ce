@@ -22,9 +22,15 @@ use std::{
     time::{Duration, Instant},
 };
 use thiserror::Error;
-use util::ResultExt;
+use crate::util::ResultExt;
 
 use super::{Stateful, StatefulInteractiveElement};
+
+// StatusCode type alias - native uses http_client, WASM uses our stub
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) type HttpStatusCode = http_client::StatusCode;
+#[cfg(target_arch = "wasm32")]
+pub(crate) type HttpStatusCode = gpui_util_wasm::StatusCode;
 
 /// The delay before showing the loading state.
 pub const LOADING_DELAY: Duration = Duration::from_millis(200);
@@ -49,7 +55,14 @@ pub enum ImageSource {
 }
 
 fn is_uri(uri: &str) -> bool {
-    http_client::Uri::from_str(uri).is_ok()
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        http_client::Uri::from_str(uri).is_ok()
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        gpui_util_wasm::Uri::from_str(uri).is_ok()
+    }
 }
 
 impl From<SharedUri> for ImageSource {
@@ -602,23 +615,35 @@ impl Asset for ImageAssetLoader {
             let bytes = match source.clone() {
                 Resource::Path(uri) => fs::read(uri.as_ref())?,
                 Resource::Uri(uri) => {
-                    let mut response = client
-                        .get(uri.as_ref(), ().into(), true)
-                        .await
-                        .with_context(|| format!("loading image asset from {uri:?}"))?;
-                    let mut body = Vec::new();
-                    response.body_mut().read_to_end(&mut body).await?;
-                    if !response.status().is_success() {
-                        let mut body = String::from_utf8_lossy(&body).into_owned();
-                        let first_line = body.lines().next().unwrap_or("").trim_end();
-                        body.truncate(first_line.len());
-                        return Err(ImageCacheError::BadStatus {
-                            uri,
-                            status: response.status(),
-                            body,
-                        });
+                    // HTTP image loading - only available on native platforms
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        let mut response = client
+                            .get(uri.as_ref(), ().into(), true)
+                            .await
+                            .with_context(|| format!("loading image asset from {uri:?}"))?;
+                        let mut body = Vec::new();
+                        response.body_mut().read_to_end(&mut body).await?;
+                        if !response.status().is_success() {
+                            let mut body = String::from_utf8_lossy(&body).into_owned();
+                            let first_line = body.lines().next().unwrap_or("").trim_end();
+                            body.truncate(first_line.len());
+                            return Err(ImageCacheError::BadStatus {
+                                uri,
+                                status: response.status(),
+                                body,
+                            });
+                        }
+                        body
                     }
-                    body
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        // TODO: Implement fetch-based HTTP loading for WASM
+                        let _ = client; // suppress unused warning
+                        return Err(ImageCacheError::Asset(
+                            format!("HTTP image loading not yet supported on WASM: {}", uri).into(),
+                        ));
+                    }
                 }
                 Resource::Embedded(path) => {
                     let data = asset_source.load(&path).ok().flatten();
@@ -715,7 +740,7 @@ pub enum ImageCacheError {
         /// The URI of the image.
         uri: SharedUri,
         /// The HTTP status code.
-        status: http_client::StatusCode,
+        status: HttpStatusCode,
         /// The HTTP response body.
         body: String,
     },

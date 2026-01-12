@@ -2,7 +2,10 @@ use crate::{App, PlatformDispatcher, RunnableMeta, RunnableVariant, TaskTiming, 
 use async_task::Runnable;
 use futures::channel::mpsc;
 use parking_lot::{Condvar, Mutex};
+#[cfg(not(target_arch = "wasm32"))]
 use smol::prelude::*;
+#[cfg(target_arch = "wasm32")]
+use futures::StreamExt;
 use std::{
     fmt::Debug,
     marker::PhantomData,
@@ -19,7 +22,7 @@ use std::{
     thread::{self, ThreadId},
     time::{Duration, Instant},
 };
-use util::TryFutureExt;
+use crate::util::TryFutureExt;
 use waker_fn::waker_fn;
 
 #[cfg(any(test, feature = "test-support"))]
@@ -149,7 +152,12 @@ impl<T> Future for Task<T> {
     fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
         match unsafe { self.get_unchecked_mut() } {
             Task(TaskState::Ready(val)) => Poll::Ready(val.take().unwrap()),
-            Task(TaskState::Spawned(task)) => task.poll(cx),
+            Task(TaskState::Spawned(task)) => {
+                // async_task::Task is a Future, so we need to pin it
+                // SAFETY: task is part of self which is already pinned
+                let pinned = unsafe { Pin::new_unchecked(task) };
+                pinned.poll(cx)
+            }
         }
     }
 }
@@ -293,6 +301,9 @@ impl BackgroundExecutor {
         priority: Priority,
     ) -> Task<R> {
         let dispatcher = self.dispatcher.clone();
+
+        // On native with realtime priority, use dedicated thread with flume channel
+        #[cfg(not(target_arch = "wasm32"))]
         let (runnable, task) = if let Priority::Realtime(realtime) = priority {
             let location = core::panic::Location::caller();
             let (mut tx, rx) = flume::bounded::<Runnable<RunnableMeta>>(1);
@@ -328,6 +339,20 @@ impl BackgroundExecutor {
                     },
                 )
         } else {
+            let location = core::panic::Location::caller();
+            async_task::Builder::new()
+                .metadata(RunnableMeta { location })
+                .spawn(
+                    move |_| future,
+                    move |runnable| {
+                        dispatcher.dispatch(RunnableVariant::Meta(runnable), label, priority)
+                    },
+                )
+        };
+
+        // On WASM, no realtime support - always use normal dispatch
+        #[cfg(target_arch = "wasm32")]
+        let (runnable, task) = {
             let location = core::panic::Location::caller();
             async_task::Builder::new()
                 .metadata(RunnableMeta { location })
@@ -639,7 +664,10 @@ impl BackgroundExecutor {
         #[cfg(any(test, feature = "test-support"))]
         return 4;
 
-        #[cfg(not(any(test, feature = "test-support")))]
+        #[cfg(target_arch = "wasm32")]
+        return 1; // WASM is single-threaded
+
+        #[cfg(all(not(any(test, feature = "test-support")), not(target_arch = "wasm32")))]
         return num_cpus::get();
     }
 

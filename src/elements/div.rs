@@ -40,7 +40,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use util::ResultExt;
+use crate::util::ResultExt;
 
 use super::ImageCacheProvider;
 

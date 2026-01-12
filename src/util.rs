@@ -7,7 +7,13 @@ use std::{
     time::Duration,
 };
 
+// On native, use the full util crate
+#[cfg(not(target_arch = "wasm32"))]
 pub use util::*;
+
+// On WASM, use the minimal WASM-compatible subset
+#[cfg(target_arch = "wasm32")]
+pub use gpui_util_wasm::*;
 
 /// A helper trait for building complex objects with imperative conditionals in a fluent style.
 pub trait FluentBuilder {

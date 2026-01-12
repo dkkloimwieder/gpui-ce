@@ -105,7 +105,7 @@ derive_more = "0.99.17"
 etagere = "0.2"
 futures = "0.3"
 gpui_macros = { package = "gpui-macros", version = "0.2.2" }
-http_client = { package = "gpui_http_client", version = "0.2.2" }
+# http_client moved to native-only deps due to smol dependency
 image = "0.25.1"
 inventory = "0.3.19"
 itertools = "0.14.0"
@@ -137,10 +137,9 @@ strum = { version = "0.27.2", features = ["derive"] }
 sum_tree = { package = "gpui_sum_tree", version = "0.2.2" }
 taffy = "=0.9.0"
 thiserror = "2.0.12"
-util = { package = "gpui_util", version = "0.2.2" }
 util_macros = { package = "gpui_util_macros", version = "0.2.2" }
 usvg = { version = "0.45.0", default-features = false }
-uuid = { version = "1.1.2", features = ["v4", "v5", "v7", "serde"] }
+uuid = { version = "1.1.2", features = ["v4", "v5", "v7", "serde", "js"] }
 waker-fn = "1.2.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -291,6 +290,8 @@ windows-registry = "0.5"
 libc = "0.2"
 num_cpus = "1.13"
 smol = "2.0"
+util = { package = "gpui_util", version = "0.2.2" }
+http_client = { package = "gpui_http_client", version = "0.2.2" }
 
 # ============================================================================
 # WASM/Browser Dependencies
@@ -319,6 +320,9 @@ web-sys = { version = "0.3", optional = true, features = [
 ] }
 js-sys = { version = "0.3", optional = true }
 getrandom = { version = "0.2", features = ["js"], optional = true }
+# getrandom 0.3 is pulled in by rand 0.9, needs wasm_js feature for WASM
+getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+gpui_util_wasm = { path = "../gpui-util-wasm" }
 # console_error_panic_hook for better panic messages in browser
 console_error_panic_hook = "0.1"
 # console_log for log output in browser

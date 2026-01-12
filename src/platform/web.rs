@@ -7,3 +7,6 @@ mod platform;
 
 pub(crate) use platform::WebPlatform;
 pub(crate) use platform::current_platform;
+
+/// Screen capture is not supported on WASM
+pub(crate) type PlatformScreenCaptureFrame = ();
