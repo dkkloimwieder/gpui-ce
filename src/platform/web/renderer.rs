@@ -15,7 +15,22 @@ use std::rc::Rc;
 use blade_graphics as gpu;
 
 #[cfg(target_arch = "wasm32")]
-use std::ptr;
+use std::{mem, ptr};
+
+#[cfg(target_arch = "wasm32")]
+use crate::scene::Quad;
+
+/// Shader data layout for quad rendering
+#[cfg(target_arch = "wasm32")]
+#[derive(blade_macros::ShaderData)]
+struct ShaderQuadsData {
+    globals: GlobalParams,
+    b_quads: gpu::BufferPiece,
+}
+
+/// Maximum number of quads per batch
+#[cfg(target_arch = "wasm32")]
+const MAX_QUADS_PER_BATCH: usize = 4096;
 
 /// Global parameters passed to all shaders.
 ///
@@ -87,6 +102,10 @@ pub struct WebRendererState {
     pub globals: GlobalParams,
     /// GPU buffer for global parameters
     pub globals_buffer: gpu::Buffer,
+    /// Quad render pipeline
+    pub quad_pipeline: gpu::RenderPipeline,
+    /// Buffer for quad instance data
+    pub quad_buffer: gpu::Buffer,
 }
 
 /// Web renderer for GPUI
@@ -196,6 +215,40 @@ impl WebRenderer {
         }
         gpu.sync_buffer(globals_buffer);
 
+        // Create shader module
+        let shader_source = include_str!("shaders.wgsl");
+        let shader = gpu.create_shader(gpu::ShaderDesc {
+            source: shader_source,
+        });
+
+        // Create quad render pipeline
+        let quad_layout = <ShaderQuadsData as gpu::ShaderData>::layout();
+        let quad_pipeline = gpu.create_render_pipeline(gpu::RenderPipelineDesc {
+            name: "quads",
+            data_layouts: &[&quad_layout],
+            vertex: shader.at("vs_quad"),
+            vertex_fetches: &[],
+            fragment: Some(shader.at("fs_quad")),
+            primitive: gpu::PrimitiveState {
+                topology: gpu::PrimitiveTopology::TriangleStrip,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            color_targets: &[gpu::ColorTargetState {
+                format: surface.info().format,
+                blend: Some(gpu::BlendState::ALPHA_BLENDING),
+                write_mask: gpu::ColorWrites::ALL,
+            }],
+            multisample_state: gpu::MultisampleState::default(),
+        });
+
+        // Create quad instance buffer
+        let quad_buffer = gpu.create_buffer(gpu::BufferDesc {
+            name: "quads",
+            size: (mem::size_of::<Quad>() * MAX_QUADS_PER_BATCH) as u64,
+            memory: gpu::Memory::Shared,
+        });
+
         *self.0.borrow_mut() = Some(WebRendererState {
             gpu,
             surface,
@@ -205,6 +258,8 @@ impl WebRenderer {
             drawable_size,
             globals,
             globals_buffer,
+            quad_pipeline,
+            quad_buffer,
         });
 
         Ok(())
@@ -243,10 +298,11 @@ impl WebRenderer {
 
     /// Draw a scene
     ///
-    /// This is a simplified draw that just clears the screen.
-    /// Full scene rendering will be implemented in follow-up work.
+    /// Renders all primitives from the scene including quads, shadows, etc.
     #[cfg(target_arch = "wasm32")]
-    pub fn draw(&self, _scene: &Scene) {
+    pub fn draw(&self, scene: &Scene) {
+        use crate::PrimitiveBatch;
+
         let mut state_ref = self.0.borrow_mut();
         let Some(state) = state_ref.as_mut() else {
             log::warn!("WebRenderer::draw called before initialization");
@@ -271,9 +327,9 @@ impl WebRenderer {
         // Get the texture view for rendering
         let target = frame.texture_view();
 
-        // Render pass to clear the screen
+        // Main render pass
         {
-            let _pass = state.command_encoder.render("clear", gpu::RenderTargetSet {
+            let mut pass = state.command_encoder.render("main", gpu::RenderTargetSet {
                 colors: &[gpu::RenderTarget {
                     view: target,
                     init_op: gpu::InitOp::Clear(gpu::TextureColor::TransparentBlack),
@@ -282,8 +338,24 @@ impl WebRenderer {
                 depth_stencil: None,
             });
 
-            // Scene rendering would go here
-            // For now, the screen is just cleared
+            // Process batches from scene
+            for batch in scene.batches() {
+                match batch {
+                    PrimitiveBatch::Quads(quads) => {
+                        Self::draw_quads_internal(
+                            &mut pass,
+                            quads,
+                            &state.globals,
+                            state.globals_buffer,
+                            state.quad_buffer,
+                            &state.quad_pipeline,
+                            &state.gpu,
+                        );
+                    }
+                    // TODO: Other primitive types
+                    _ => {}
+                }
+            }
         }
 
         // Queue frame for presentation
@@ -292,6 +364,50 @@ impl WebRenderer {
         // Submit
         let sync_point = state.gpu.submit(&mut state.command_encoder);
         state.last_sync_point = Some(sync_point);
+    }
+
+    /// Internal helper to draw quads during a render pass
+    #[cfg(target_arch = "wasm32")]
+    fn draw_quads_internal(
+        pass: &mut gpu::RenderCommandEncoder,
+        quads: &[Quad],
+        globals: &GlobalParams,
+        globals_buffer: gpu::Buffer,
+        quad_buffer: gpu::Buffer,
+        pipeline: &gpu::RenderPipeline,
+        gpu: &gpu::Context,
+    ) {
+        if quads.is_empty() {
+            return;
+        }
+
+        let count = quads.len().min(MAX_QUADS_PER_BATCH);
+
+        // Upload quad data to buffer
+        unsafe {
+            ptr::copy_nonoverlapping(
+                quads.as_ptr(),
+                quad_buffer.data() as *mut Quad,
+                count,
+            );
+        }
+        gpu.sync_buffer(quad_buffer);
+
+        // Bind pipeline and data
+        let mut encoder = pass.with(pipeline);
+        encoder.bind(
+            0,
+            &ShaderQuadsData {
+                globals: *globals,
+                b_quads: gpu::BufferPiece {
+                    buffer: quad_buffer,
+                    offset: 0,
+                },
+            },
+        );
+
+        // Draw instanced quads (4 vertices per quad, N instances)
+        encoder.draw(0, 4, 0, count as u32);
     }
 
     /// Draw a scene (non-WASM stub)
@@ -414,6 +530,113 @@ impl WebRenderer {
     /// Clear the screen with color index (non-WASM stub)
     #[cfg(not(target_arch = "wasm32"))]
     pub fn clear_with_index(&self, _color_index: u32) {
+        // No-op on non-WASM
+    }
+
+    /// Draw a test quad with specified bounds and color
+    ///
+    /// This is useful for testing that the quad shader is working.
+    /// x, y, w, h are in pixels from top-left.
+    /// Color is specified as (h, s, l, a) where h is 0-1, s is 0-1, l is 0-1, a is 0-1.
+    #[cfg(target_arch = "wasm32")]
+    pub fn draw_test_quad(&self, x: f32, y: f32, w: f32, h: f32, color: [f32; 4]) {
+        use crate::scene::{Background, BorderStyle, Bounds, ContentMask, Corners, DrawOrder, Edges, Hsla};
+        use crate::ScaledPixels;
+
+        let mut state_ref = self.0.borrow_mut();
+        let Some(state) = state_ref.as_mut() else {
+            log::warn!("WebRenderer::draw_test_quad called before initialization");
+            return;
+        };
+
+        // Wait for previous frame
+        if let Some(ref sp) = state.last_sync_point {
+            let _ = state.gpu.wait_for(sp, 1000);
+        }
+
+        // Acquire frame
+        let frame = state.surface.acquire_frame();
+        if !frame.is_valid() {
+            log::warn!("Failed to acquire frame");
+            return;
+        }
+
+        // Create a test quad
+        let quad = Quad {
+            order: DrawOrder::default(),
+            border_style: BorderStyle::default(),
+            bounds: Bounds {
+                origin: crate::Point {
+                    x: ScaledPixels(x),
+                    y: ScaledPixels(y),
+                },
+                size: crate::Size {
+                    width: ScaledPixels(w),
+                    height: ScaledPixels(h),
+                },
+            },
+            content_mask: ContentMask {
+                bounds: Bounds {
+                    origin: crate::Point {
+                        x: ScaledPixels(0.0),
+                        y: ScaledPixels(0.0),
+                    },
+                    size: crate::Size {
+                        width: ScaledPixels(state.globals.viewport_size[0]),
+                        height: ScaledPixels(state.globals.viewport_size[1]),
+                    },
+                },
+            },
+            background: Background::Solid(Hsla {
+                h: color[0],
+                s: color[1],
+                l: color[2],
+                a: color[3],
+            }),
+            border_color: Hsla::default(),
+            corner_radii: Corners::default(),
+            border_widths: Edges::default(),
+        };
+
+        // Begin encoding
+        state.command_encoder.start();
+
+        // Get the texture view for rendering
+        let target = frame.texture_view();
+
+        // Main render pass
+        {
+            let mut pass = state.command_encoder.render("main", gpu::RenderTargetSet {
+                colors: &[gpu::RenderTarget {
+                    view: target,
+                    init_op: gpu::InitOp::Clear(gpu::TextureColor::OpaqueBlack),
+                    finish_op: gpu::FinishOp::Store,
+                }],
+                depth_stencil: None,
+            });
+
+            Self::draw_quads_internal(
+                &mut pass,
+                &[quad],
+                &state.globals,
+                state.globals_buffer,
+                state.quad_buffer,
+                &state.quad_pipeline,
+                &state.gpu,
+            );
+        }
+
+        // Queue frame for presentation
+        state.command_encoder.present(frame);
+
+        // Submit
+        let sync_point = state.gpu.submit(&mut state.command_encoder);
+        state.last_sync_point = Some(sync_point);
+    }
+
+    /// Draw a test quad (non-WASM stub)
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn draw_test_quad(&self, _x: f32, _y: f32, _w: f32, _h: f32, _color: [f32; 4]) {
         // No-op on non-WASM
     }
 
