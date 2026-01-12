@@ -14,6 +14,40 @@ use std::rc::Rc;
 #[cfg(target_arch = "wasm32")]
 use blade_graphics as gpu;
 
+#[cfg(target_arch = "wasm32")]
+use std::ptr;
+
+/// Global parameters passed to all shaders.
+///
+/// This struct must match the layout in shaders.wgsl:
+/// ```wgsl
+/// struct GlobalParams {
+///     viewport_size: vec2<f32>,
+///     premultiplied_alpha: u32,
+///     pad: u32,
+/// }
+/// ```
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct GlobalParams {
+    /// Viewport size in pixels
+    pub viewport_size: [f32; 2],
+    /// Whether to use premultiplied alpha (1) or not (0)
+    pub premultiplied_alpha: u32,
+    /// Padding for alignment
+    pub pad: u32,
+}
+
+impl Default for GlobalParams {
+    fn default() -> Self {
+        Self {
+            viewport_size: [800.0, 600.0],
+            premultiplied_alpha: 0,
+            pad: 0,
+        }
+    }
+}
+
 /// Configuration for the web renderer surface
 pub struct WebSurfaceConfig {
     /// Size of the surface in device pixels
@@ -49,6 +83,10 @@ pub struct WebRendererState {
     pub last_sync_point: Option<gpu::SyncPoint>,
     /// Current drawable size
     pub drawable_size: Size<DevicePixels>,
+    /// Global parameters for shaders
+    pub globals: GlobalParams,
+    /// GPU buffer for global parameters
+    pub globals_buffer: gpu::Buffer,
 }
 
 /// Web renderer for GPUI
@@ -128,6 +166,36 @@ impl WebRenderer {
             height: DevicePixels(config.size.height as i32),
         };
 
+        // Determine premultiplied alpha from surface info
+        let premultiplied_alpha = match surface.info().alpha {
+            gpu::AlphaMode::Ignored | gpu::AlphaMode::PostMultiplied => 0,
+            gpu::AlphaMode::PreMultiplied => 1,
+        };
+
+        // Create global parameters
+        let globals = GlobalParams {
+            viewport_size: [config.size.width as f32, config.size.height as f32],
+            premultiplied_alpha,
+            pad: 0,
+        };
+
+        // Create GPU buffer for globals (uniform buffer)
+        let globals_buffer = gpu.create_buffer(gpu::BufferDesc {
+            name: "globals",
+            size: std::mem::size_of::<GlobalParams>() as u64,
+            memory: gpu::Memory::Shared,
+        });
+
+        // Initialize the buffer with current globals
+        unsafe {
+            ptr::copy_nonoverlapping(
+                &globals as *const GlobalParams,
+                globals_buffer.data() as *mut GlobalParams,
+                1,
+            );
+        }
+        gpu.sync_buffer(globals_buffer);
+
         *self.0.borrow_mut() = Some(WebRendererState {
             gpu,
             surface,
@@ -135,12 +203,15 @@ impl WebRenderer {
             command_encoder,
             last_sync_point: None,
             drawable_size,
+            globals,
+            globals_buffer,
         });
 
         Ok(())
     }
 
     /// Update the drawable size (call on resize)
+    #[cfg(target_arch = "wasm32")]
     pub fn update_drawable_size(&self, size: Size<DevicePixels>) {
         if let Some(state) = self.0.borrow_mut().as_mut() {
             state.drawable_size = size;
@@ -150,7 +221,24 @@ impl WebRenderer {
                 depth: 1,
             };
             state.gpu.reconfigure_surface(&mut state.surface, state.surface_config.clone());
+
+            // Update globals with new viewport size
+            state.globals.viewport_size = [size.width.0 as f32, size.height.0 as f32];
+            unsafe {
+                ptr::copy_nonoverlapping(
+                    &state.globals as *const GlobalParams,
+                    state.globals_buffer.data() as *mut GlobalParams,
+                    1,
+                );
+            }
+            state.gpu.sync_buffer(state.globals_buffer);
         }
+    }
+
+    /// Update the drawable size (call on resize) - non-WASM stub
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn update_drawable_size(&self, _size: Size<DevicePixels>) {
+        // No-op on non-WASM
     }
 
     /// Draw a scene
@@ -336,6 +424,24 @@ impl WebRenderer {
             .as_ref()
             .map(|s| s.drawable_size)
             .unwrap_or_else(|| size(DevicePixels(800), DevicePixels(600)))
+    }
+
+    /// Get the current global parameters
+    pub fn globals(&self) -> GlobalParams {
+        self.0
+            .borrow()
+            .as_ref()
+            .map(|s| s.globals)
+            .unwrap_or_default()
+    }
+
+    /// Get a buffer piece for the globals buffer (for shader binding)
+    #[cfg(target_arch = "wasm32")]
+    pub fn globals_buffer_piece(&self) -> Option<gpu::BufferPiece> {
+        self.0.borrow().as_ref().map(|s| gpu::BufferPiece {
+            buffer: s.globals_buffer,
+            offset: 0,
+        })
     }
 }
 

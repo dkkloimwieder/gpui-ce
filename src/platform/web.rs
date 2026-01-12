@@ -15,7 +15,7 @@ pub(crate) use platform::current_platform;
 pub use platform::DEFAULT_CANVAS_ID;
 #[cfg(target_arch = "wasm32")]
 pub use platform::get_canvas_element;
-pub use renderer::{WebRenderer, WebSurfaceConfig};
+pub use renderer::{GlobalParams, WebRenderer, WebRendererState, WebSurfaceConfig};
 pub(crate) use window::WebWindow;
 
 /// Screen capture is not supported on WASM
