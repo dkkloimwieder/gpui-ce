@@ -21,6 +21,9 @@ use std::{
     sync::Arc,
 };
 
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::JsCast;
+
 /// Web window state
 pub(crate) struct WebWindowState {
     /// Window handle for GPUI
@@ -29,8 +32,11 @@ pub(crate) struct WebWindowState {
     pub(crate) bounds: Bounds<Pixels>,
     /// Current scale factor (device pixel ratio)
     pub(crate) scale_factor: f32,
-    /// Canvas element ID
+    /// Canvas element ID (used for raw_window_handle)
     pub(crate) canvas_id: u32,
+    /// Canvas element reference (for WASM target only)
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) canvas: Option<web_sys::HtmlCanvasElement>,
     /// Callbacks
     pub(crate) request_frame_callback: Option<Box<dyn FnMut(RequestFrameOptions)>>,
     pub(crate) input_callback: Option<Box<dyn FnMut(PlatformInput) -> DispatchEventResult>>,
@@ -73,17 +79,76 @@ pub(crate) struct WebWindow(pub(crate) Rc<Mutex<WebWindowState>>);
 
 impl WebWindow {
     /// Create a new web window backed by a canvas element
+    #[cfg(target_arch = "wasm32")]
+    pub fn new(
+        handle: crate::AnyWindowHandle,
+        params: WindowParams,
+        display: Rc<dyn PlatformDisplay>,
+        canvas_id: u32,
+        canvas: web_sys::HtmlCanvasElement,
+    ) -> Self {
+        // Get device pixel ratio for scale factor
+        let scale_factor = get_device_pixel_ratio();
+
+        // Get canvas size or use params bounds
+        let (width, height) = (
+            canvas.client_width() as f32,
+            canvas.client_height() as f32,
+        );
+
+        // Set canvas dimensions to match client size with device pixel ratio
+        let device_width = (width * scale_factor) as u32;
+        let device_height = (height * scale_factor) as u32;
+        canvas.set_width(device_width);
+        canvas.set_height(device_height);
+
+        // Use canvas size for bounds
+        let bounds = crate::Bounds {
+            origin: params.bounds.origin,
+            size: size(px(width), px(height)),
+        };
+
+        Self(Rc::new(Mutex::new(WebWindowState {
+            handle,
+            bounds,
+            scale_factor,
+            canvas_id,
+            canvas: Some(canvas),
+            request_frame_callback: None,
+            input_callback: None,
+            active_status_change_callback: None,
+            hover_status_change_callback: None,
+            resize_callback: None,
+            moved_callback: None,
+            should_close_callback: None,
+            close_callback: None,
+            appearance_change_callback: None,
+            hit_test_callback: None,
+            input_handler: None,
+            display,
+            sprite_atlas: Arc::new(WebAtlas::new()),
+            title: String::new(),
+            is_active: true,
+            is_hovered: false,
+            is_fullscreen: false,
+            mouse_position: point(px(0.0), px(0.0)),
+            modifiers: Modifiers::default(),
+            last_mouse_down_time: None,
+            last_mouse_down_button: None,
+            click_count: 0,
+        })))
+    }
+
+    /// Create a new web window (non-WASM fallback for testing)
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn new(
         handle: crate::AnyWindowHandle,
         params: WindowParams,
         display: Rc<dyn PlatformDisplay>,
         canvas_id: u32,
     ) -> Self {
-        // Get initial size from params or use display bounds
         let bounds = params.bounds;
-
-        // Get device pixel ratio for scale factor
-        let scale_factor = get_device_pixel_ratio();
+        let scale_factor = 1.0;
 
         Self(Rc::new(Mutex::new(WebWindowState {
             handle,
@@ -113,6 +178,12 @@ impl WebWindow {
             last_mouse_down_button: None,
             click_count: 0,
         })))
+    }
+
+    /// Get the canvas element (WASM only)
+    #[cfg(target_arch = "wasm32")]
+    pub fn canvas(&self) -> Option<web_sys::HtmlCanvasElement> {
+        self.0.lock().canvas.clone()
     }
 
     /// Called when browser window is resized

@@ -12,6 +12,9 @@ mod window;
 
 pub(crate) use platform::WebPlatform;
 pub(crate) use platform::current_platform;
+pub use platform::DEFAULT_CANVAS_ID;
+#[cfg(target_arch = "wasm32")]
+pub use platform::get_canvas_element;
 pub(crate) use renderer::WebRenderer;
 pub(crate) use window::WebWindow;
 

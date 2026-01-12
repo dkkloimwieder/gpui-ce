@@ -27,6 +27,26 @@ thread_local! {
     static PLATFORM: RefCell<Option<Rc<WebPlatform>>> = const { RefCell::new(None) };
 }
 
+/// Default canvas element ID for GPUI
+pub const DEFAULT_CANVAS_ID: &str = "gpui-canvas";
+
+/// Get canvas element from the DOM by ID
+#[cfg(target_arch = "wasm32")]
+pub fn get_canvas_element(canvas_id: &str) -> Result<web_sys::HtmlCanvasElement> {
+    use wasm_bindgen::JsCast;
+
+    let window = web_sys::window()
+        .ok_or_else(|| anyhow::anyhow!("No window object"))?;
+    let document = window.document()
+        .ok_or_else(|| anyhow::anyhow!("No document object"))?;
+    let element = document.get_element_by_id(canvas_id)
+        .ok_or_else(|| anyhow::anyhow!("Canvas element '{}' not found", canvas_id))?;
+    let canvas = element.dyn_into::<web_sys::HtmlCanvasElement>()
+        .map_err(|_| anyhow::anyhow!("Element '{}' is not a canvas", canvas_id))?;
+
+    Ok(canvas)
+}
+
 /// Web platform implementation for WASM
 pub(crate) struct WebPlatform {
     background_executor: BackgroundExecutor,
@@ -116,12 +136,13 @@ impl Platform for WebPlatform {
         self.active_window.borrow().as_ref().map(|w| w.0.lock().handle)
     }
 
+    #[cfg(target_arch = "wasm32")]
     fn open_window(
         &self,
         handle: AnyWindowHandle,
         options: WindowParams,
     ) -> Result<Box<dyn PlatformWindow>> {
-        // Generate a unique canvas ID
+        // Generate a unique canvas ID for raw_window_handle
         let canvas_id = {
             let mut id = self.next_canvas_id.borrow_mut();
             let current = *id;
@@ -129,7 +150,39 @@ impl Platform for WebPlatform {
             current
         };
 
-        // Create the web window
+        // Get or create canvas element from the DOM
+        // For now, use the default canvas ID; future: support multiple canvases
+        let canvas = get_canvas_element(DEFAULT_CANVAS_ID)?;
+
+        // Create the web window with the canvas
+        let window = WebWindow::new(
+            handle,
+            options,
+            self.display.clone(),
+            canvas_id,
+            canvas,
+        );
+
+        // Store as active window
+        *self.active_window.borrow_mut() = Some(window.clone());
+
+        Ok(Box::new(window))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn open_window(
+        &self,
+        handle: AnyWindowHandle,
+        options: WindowParams,
+    ) -> Result<Box<dyn PlatformWindow>> {
+        // Non-WASM fallback for testing
+        let canvas_id = {
+            let mut id = self.next_canvas_id.borrow_mut();
+            let current = *id;
+            *id += 1;
+            current
+        };
+
         let window = WebWindow::new(
             handle,
             options,
@@ -137,9 +190,7 @@ impl Platform for WebPlatform {
             canvas_id,
         );
 
-        // Store as active window
         *self.active_window.borrow_mut() = Some(window.clone());
-
         Ok(Box::new(window))
     }
 
