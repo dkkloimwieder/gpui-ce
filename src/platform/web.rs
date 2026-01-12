@@ -5,10 +5,12 @@
 
 mod dispatcher;
 mod platform;
+mod renderer;
 mod window;
 
 pub(crate) use platform::WebPlatform;
 pub(crate) use platform::current_platform;
+pub(crate) use renderer::WebRenderer;
 pub(crate) use window::WebWindow;
 
 /// Screen capture is not supported on WASM
