@@ -848,9 +848,9 @@ pub(crate) trait PlatformAtlas: Send + Sync {
     fn remove(&self, key: &AtlasKey);
 }
 
-struct AtlasTextureList<T> {
-    textures: Vec<Option<T>>,
-    free_list: Vec<usize>,
+pub(crate) struct AtlasTextureList<T> {
+    pub textures: Vec<Option<T>>,
+    pub free_list: Vec<usize>,
 }
 
 impl<T> Default for AtlasTextureList<T> {
