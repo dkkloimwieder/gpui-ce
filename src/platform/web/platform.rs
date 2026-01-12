@@ -1,8 +1,10 @@
-//! Web platform implementation - stubs for WASM compilation
+//! Web platform implementation for GPUI
 //!
-//! This provides minimal implementations to allow gpui-ce to compile
-//! to wasm32-unknown-unknown. Real implementations will be added in follow-up work.
+//! Provides browser-based platform support using WebGPU for rendering
+//! and web APIs for windowing, events, and text.
 
+use super::dispatcher::WebDispatcher;
+use super::window::WebWindow;
 use crate::{
     AnyWindowHandle, BackgroundExecutor, ClipboardItem, CursorStyle, ForegroundExecutor, Keymap,
     NoopTextSystem, Platform, PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper,
@@ -13,6 +15,7 @@ use anyhow::Result;
 use futures::channel::oneshot;
 use parking_lot::Mutex;
 use std::{
+    cell::RefCell,
     path::{Path, PathBuf},
     rc::Rc,
     sync::Arc,
@@ -25,15 +28,32 @@ pub(crate) struct WebPlatform {
     foreground_executor: ForegroundExecutor,
     text_system: Arc<dyn PlatformTextSystem>,
     clipboard: Mutex<Option<ClipboardItem>>,
+    /// Dispatcher for task scheduling
+    dispatcher: Arc<WebDispatcher>,
+    /// Active window (single window for now)
+    active_window: RefCell<Option<WebWindow>>,
+    /// Primary display
+    display: Rc<WebDisplay>,
+    /// Next canvas ID
+    next_canvas_id: RefCell<u32>,
+    /// Current cursor style
+    cursor_style: RefCell<CursorStyle>,
 }
 
 impl WebPlatform {
+    /// Create a new web platform with the given executors
     pub fn new(background_executor: BackgroundExecutor, foreground_executor: ForegroundExecutor) -> Rc<Self> {
+        let dispatcher = Arc::new(WebDispatcher::new());
         Rc::new(Self {
             background_executor,
             foreground_executor,
             text_system: Arc::new(NoopTextSystem::new()),
             clipboard: Mutex::new(None),
+            dispatcher,
+            active_window: RefCell::new(None),
+            display: Rc::new(WebDisplay::new()),
+            next_canvas_id: RefCell::new(1),
+            cursor_style: RefCell::new(CursorStyle::Arrow),
         })
     }
 }
@@ -52,8 +72,15 @@ impl Platform for WebPlatform {
     }
 
     fn run(&self, on_finish_launching: Box<dyn FnOnce()>) {
+        // Run the launch callback
         on_finish_launching();
-        // TODO: Set up requestAnimationFrame loop
+
+        // In WASM, we don't block here. The event loop is driven by browser events
+        // and requestAnimationFrame. The caller should set up event handlers
+        // after calling run().
+        //
+        // The dispatcher will be polled via requestAnimationFrame callbacks
+        // that are set up when windows request frames.
     }
 
     fn quit(&self) {
@@ -73,23 +100,42 @@ impl Platform for WebPlatform {
     fn unhide_other_apps(&self) {}
 
     fn displays(&self) -> Vec<Rc<dyn PlatformDisplay>> {
-        vec![Rc::new(WebDisplay)]
+        vec![self.display.clone()]
     }
 
     fn primary_display(&self) -> Option<Rc<dyn PlatformDisplay>> {
-        Some(Rc::new(WebDisplay))
+        Some(self.display.clone())
     }
 
     fn active_window(&self) -> Option<AnyWindowHandle> {
-        None // TODO
+        self.active_window.borrow().as_ref().map(|w| w.0.lock().handle)
     }
 
     fn open_window(
         &self,
-        _handle: AnyWindowHandle,
-        _options: WindowParams,
+        handle: AnyWindowHandle,
+        options: WindowParams,
     ) -> Result<Box<dyn PlatformWindow>> {
-        anyhow::bail!("WebPlatform::open_window not yet implemented")
+        // Generate a unique canvas ID
+        let canvas_id = {
+            let mut id = self.next_canvas_id.borrow_mut();
+            let current = *id;
+            *id += 1;
+            current
+        };
+
+        // Create the web window
+        let window = WebWindow::new(
+            handle,
+            options,
+            self.display.clone(),
+            canvas_id,
+        );
+
+        // Store as active window
+        *self.active_window.borrow_mut() = Some(window.clone());
+
+        Ok(Box::new(window))
     }
 
     fn window_appearance(&self) -> WindowAppearance {
@@ -199,11 +245,23 @@ impl Platform for WebPlatform {
 
 /// Web display - represents the browser viewport
 #[derive(Debug)]
-struct WebDisplay;
+pub(crate) struct WebDisplay {
+    /// Unique display ID
+    id: DisplayId,
+}
+
+impl WebDisplay {
+    /// Create a new web display
+    pub fn new() -> Self {
+        Self {
+            id: DisplayId(0),
+        }
+    }
+}
 
 impl PlatformDisplay for WebDisplay {
     fn id(&self) -> DisplayId {
-        DisplayId(0)
+        self.id
     }
 
     fn uuid(&self) -> Result<Uuid> {
@@ -211,12 +269,34 @@ impl PlatformDisplay for WebDisplay {
     }
 
     fn bounds(&self) -> Bounds<Pixels> {
-        // TODO: Get actual window.innerWidth/innerHeight
-        Bounds {
-            origin: point(px(0.0), px(0.0)),
-            size: crate::size(px(1920.0), px(1080.0)),
+        #[cfg(target_arch = "wasm32")]
+        {
+            let (width, height) = get_window_inner_size();
+            Bounds {
+                origin: point(px(0.0), px(0.0)),
+                size: crate::size(px(width), px(height)),
+            }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            Bounds {
+                origin: point(px(0.0), px(0.0)),
+                size: crate::size(px(1920.0), px(1080.0)),
+            }
         }
     }
+}
+
+/// Get browser window inner size
+#[cfg(target_arch = "wasm32")]
+fn get_window_inner_size() -> (f32, f32) {
+    web_sys::window()
+        .and_then(|w| {
+            let width = w.inner_width().ok()?.as_f64()? as f32;
+            let height = w.inner_height().ok()?.as_f64()? as f32;
+            Some((width, height))
+        })
+        .unwrap_or((1920.0, 1080.0))
 }
 
 struct WebKeyboardLayout;
