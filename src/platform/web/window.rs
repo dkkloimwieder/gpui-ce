@@ -24,6 +24,9 @@ use std::{
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast;
 
+#[cfg(target_arch = "wasm32")]
+use super::WebRenderer;
+
 /// Web window state
 pub(crate) struct WebWindowState {
     /// Window handle for GPUI
@@ -37,6 +40,9 @@ pub(crate) struct WebWindowState {
     /// Canvas element reference (for WASM target only)
     #[cfg(target_arch = "wasm32")]
     pub(crate) canvas: Option<web_sys::HtmlCanvasElement>,
+    /// WebGPU renderer (set after async initialization)
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) renderer: Option<WebRenderer>,
     /// Callbacks
     pub(crate) request_frame_callback: Option<Box<dyn FnMut(RequestFrameOptions)>>,
     pub(crate) input_callback: Option<Box<dyn FnMut(PlatformInput) -> DispatchEventResult>>,
@@ -51,7 +57,7 @@ pub(crate) struct WebWindowState {
     pub(crate) input_handler: Option<PlatformInputHandler>,
     /// Display reference
     pub(crate) display: Rc<dyn PlatformDisplay>,
-    /// Sprite atlas for this window
+    /// Sprite atlas for this window (fallback when renderer not initialized)
     pub(crate) sprite_atlas: Arc<dyn PlatformAtlas>,
     /// Window title
     pub(crate) title: String,
@@ -114,6 +120,7 @@ impl WebWindow {
             scale_factor,
             canvas_id,
             canvas: Some(canvas),
+            renderer: None,
             request_frame_callback: None,
             input_callback: None,
             active_status_change_callback: None,
@@ -184,6 +191,21 @@ impl WebWindow {
     #[cfg(target_arch = "wasm32")]
     pub fn canvas(&self) -> Option<web_sys::HtmlCanvasElement> {
         self.0.lock().canvas.clone()
+    }
+
+    /// Set the WebGPU renderer after async initialization
+    ///
+    /// This must be called after the renderer is initialized asynchronously.
+    /// Until set, draw() will be a no-op.
+    #[cfg(target_arch = "wasm32")]
+    pub fn set_renderer(&self, renderer: WebRenderer) {
+        self.0.lock().renderer = Some(renderer);
+    }
+
+    /// Get the renderer if initialized
+    #[cfg(target_arch = "wasm32")]
+    pub fn renderer(&self) -> Option<WebRenderer> {
+        self.0.lock().renderer.clone()
     }
 
     /// Called when browser window is resized
@@ -622,13 +644,37 @@ impl PlatformWindow for WebWindow {
         self.0.lock().appearance_change_callback = Some(callback);
     }
 
-    fn draw(&self, _scene: &Scene) {
-        // Drawing is handled by the blade renderer
-        // This callback is used by GPUI to trigger scene rendering
+    fn draw(&self, scene: &Scene) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            // Clone the renderer while holding the lock, then release lock before drawing
+            let renderer = {
+                let state = self.0.lock();
+                state.renderer.clone()
+            };
+            if let Some(renderer) = renderer {
+                renderer.draw(scene);
+            } else {
+                log::warn!("WebWindow::draw called before renderer is initialized");
+            }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let _ = scene;
+            // No-op on non-WASM
+        }
     }
 
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
-        self.0.lock().sprite_atlas.clone()
+        let state = self.0.lock();
+        // Use GPU atlas from renderer if available, otherwise fallback to simple atlas
+        #[cfg(target_arch = "wasm32")]
+        if let Some(ref renderer) = state.renderer {
+            if let Some(atlas) = renderer.sprite_atlas() {
+                return atlas;
+            }
+        }
+        state.sprite_atlas.clone()
     }
 
     fn gpu_specs(&self) -> Option<GpuSpecs> {

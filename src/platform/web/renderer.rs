@@ -7,9 +7,10 @@
 //! Note: GPU context initialization on WASM is async. Use `initialize_async` with
 //! wasm-bindgen-futures to properly initialize the renderer.
 
-use crate::{DevicePixels, Scene, Size, size};
+use crate::{DevicePixels, PlatformAtlas, Scene, Size, size};
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Arc;
 
 #[cfg(target_arch = "wasm32")]
 use blade_graphics as gpu;
@@ -143,14 +144,15 @@ pub struct WebRendererState {
     pub poly_sprite_buffer: gpu::Buffer,
     /// Sampler for atlas textures
     pub atlas_sampler: gpu::Sampler,
-    /// Texture atlas for sprites/glyphs
-    pub atlas: WebGpuAtlas,
+    /// Texture atlas for sprites/glyphs (Arc for sharing with window)
+    pub atlas: Arc<WebGpuAtlas>,
 }
 
 /// Web renderer for GPUI
 ///
 /// This is wrapped in Rc<RefCell<>> since WASM is single-threaded
 /// and we don't need Send+Sync.
+#[derive(Clone)]
 pub struct WebRenderer(pub Rc<RefCell<Option<WebRendererState>>>);
 
 impl WebRenderer {
@@ -354,8 +356,8 @@ impl WebRenderer {
             memory: gpu::Memory::Shared,
         });
 
-        // Create texture atlas for sprites and glyphs
-        let atlas = WebGpuAtlas::new(&gpu);
+        // Create texture atlas for sprites and glyphs (Arc for sharing with window)
+        let atlas = Arc::new(WebGpuAtlas::new(&gpu));
 
         *self.0.borrow_mut() = Some(WebRendererState {
             gpu,
@@ -909,14 +911,16 @@ impl WebRenderer {
     /// Get access to the texture atlas for sprite/glyph rendering
     ///
     /// Returns None if the renderer hasn't been initialized yet.
+    /// This returns Arc<dyn PlatformAtlas> for use with GPUI's sprite_atlas() method.
     #[cfg(target_arch = "wasm32")]
-    pub fn atlas(&self) -> Option<impl std::ops::Deref<Target = WebGpuAtlas> + '_> {
-        let state = self.0.borrow();
-        if state.is_some() {
-            Some(std::cell::Ref::map(state, |s| &s.as_ref().unwrap().atlas))
-        } else {
-            None
-        }
+    pub fn sprite_atlas(&self) -> Option<Arc<dyn PlatformAtlas>> {
+        self.0.borrow().as_ref().map(|s| s.atlas.clone() as Arc<dyn PlatformAtlas>)
+    }
+
+    /// Get the raw atlas reference (for internal use)
+    #[cfg(target_arch = "wasm32")]
+    pub fn atlas(&self) -> Option<Arc<WebGpuAtlas>> {
+        self.0.borrow().as_ref().map(|s| s.atlas.clone())
     }
 }
 
