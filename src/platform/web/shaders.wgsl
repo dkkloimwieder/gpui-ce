@@ -330,13 +330,13 @@ fn vs_mono_sprite(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index
 
 @fragment
 fn fs_mono_sprite(input: MonoSpriteVarying) -> @location(0) vec4<f32> {
-    // Alpha clip first
+    // Sample grayscale value from atlas first (must be in uniform control flow)
+    let sample = textureSample(t_sprite, s_sprite, input.tile_position).r;
+
+    // Alpha clip after texture sample
     if (any(input.clip_distances < vec4<f32>(0.0))) {
         return vec4<f32>(0.0);
     }
-
-    // Sample grayscale value from atlas
-    let sample = textureSample(t_sprite, s_sprite, input.tile_position).r;
 
     // Apply color tint
     return blend_color(input.color, sample * input.color.a);
@@ -381,13 +381,14 @@ const GRAYSCALE_FACTORS: vec3<f32> = vec3<f32>(0.2126, 0.7152, 0.0722);
 
 @fragment
 fn fs_poly_sprite(input: PolySpriteVarying) -> @location(0) vec4<f32> {
-    // Alpha clip first
+    // Sample texture first (must be in uniform control flow)
+    let sample = textureSample(t_sprite, s_sprite, input.tile_position);
+    let sprite = b_poly_sprites[input.sprite_id];
+
+    // Alpha clip after texture sample
     if (any(input.clip_distances < vec4<f32>(0.0))) {
         return vec4<f32>(0.0);
     }
-
-    let sample = textureSample(t_sprite, s_sprite, input.tile_position);
-    let sprite = b_poly_sprites[input.sprite_id];
 
     var color = sample;
     // Apply grayscale if requested
