@@ -881,6 +881,204 @@ impl WebRenderer {
         // No-op on non-WASM
     }
 
+    /// Draw test text at the specified position
+    ///
+    /// Uses Canvas 2D to render text and displays it as a monochrome sprite.
+    /// This tests the full text rendering pipeline: canvas → atlas → sprite.
+    #[cfg(target_arch = "wasm32")]
+    pub fn draw_test_text(&self, text: &str, x: f32, y: f32, font_size: f32, color: [f32; 4]) {
+        use crate::{
+            AtlasKey, Bounds, ContentMask, Hsla, ScaledPixels,
+            scene::{DrawOrder, TransformationMatrix},
+        };
+        use wasm_bindgen::JsCast;
+
+        let mut state_ref = self.0.borrow_mut();
+        let Some(state) = state_ref.as_mut() else {
+            log::warn!("WebRenderer::draw_test_text called before initialization");
+            return;
+        };
+
+        // Wait for previous frame
+        if let Some(ref sp) = state.last_sync_point {
+            let _ = state.gpu.wait_for(sp, 1000);
+        }
+
+        // Create offscreen canvas for text rendering
+        let document = web_sys::window()
+            .expect("no window")
+            .document()
+            .expect("no document");
+        let canvas = document
+            .create_element("canvas")
+            .expect("failed to create canvas")
+            .dyn_into::<web_sys::HtmlCanvasElement>()
+            .expect("not a canvas");
+        let context = canvas
+            .get_context("2d")
+            .expect("failed to get 2d context")
+            .expect("no 2d context")
+            .dyn_into::<web_sys::CanvasRenderingContext2d>()
+            .expect("not a 2d context");
+
+        // Measure text to determine canvas size
+        let font = format!("{}px system-ui, sans-serif", font_size);
+        context.set_font(&font);
+        let metrics = context.measure_text(text).expect("measure_text failed");
+        let text_width = metrics.width().ceil() as u32 + 4; // Add padding
+        let text_height = (font_size * 1.3).ceil() as u32 + 4;
+
+        canvas.set_width(text_width);
+        canvas.set_height(text_height);
+
+        // Re-set font after resize (canvas resize clears state)
+        context.set_font(&font);
+        context.set_fill_style_str("white");
+        context.set_text_baseline("top");
+
+        // Clear and draw text
+        context.clear_rect(0.0, 0.0, text_width as f64, text_height as f64);
+        context.fill_text(text, 2.0, 2.0).expect("fill_text failed");
+
+        // Get image data and convert to grayscale
+        let image_data = context
+            .get_image_data(0.0, 0.0, text_width as f64, text_height as f64)
+            .expect("get_image_data failed");
+        let rgba_data = image_data.data();
+
+        // Convert RGBA to grayscale (using alpha channel)
+        let mut grayscale = Vec::with_capacity((text_width * text_height) as usize);
+        for i in (0..rgba_data.len()).step_by(4) {
+            grayscale.push(rgba_data[i + 3]); // Use alpha channel
+        }
+
+        // Create atlas key for this text using a glyph key with fake params
+        // Use hash of text+size as a unique "glyph id"
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher as _};
+        let mut hasher = DefaultHasher::new();
+        text.hash(&mut hasher);
+        (font_size as u32).hash(&mut hasher);
+        let hash = hasher.finish();
+
+        let key = AtlasKey::Glyph(crate::RenderGlyphParams {
+            font_id: crate::FontId(0),
+            glyph_id: crate::GlyphId(hash as u32),
+            font_size: crate::Pixels(font_size),
+            subpixel_variant: crate::Point { x: 0, y: 0 },
+            scale_factor: 1.0,
+            is_emoji: false,
+        });
+
+        // Upload to atlas
+        let tile = state
+            .atlas
+            .get_or_insert_with(&key, &mut || {
+                Ok(Some((
+                    Size {
+                        width: DevicePixels(text_width as i32),
+                        height: DevicePixels(text_height as i32),
+                    },
+                    std::borrow::Cow::Owned(grayscale.clone()),
+                )))
+            })
+            .expect("atlas insert failed")
+            .expect("no tile");
+
+        // Flush atlas uploads
+        state.atlas.flush_uploads();
+
+        // Create MonochromeSprite
+        let sprite = MonochromeSprite {
+            order: DrawOrder::default(),
+            pad: 0,
+            bounds: Bounds {
+                origin: crate::Point {
+                    x: ScaledPixels(x),
+                    y: ScaledPixels(y),
+                },
+                size: crate::Size {
+                    width: ScaledPixels(text_width as f32),
+                    height: ScaledPixels(text_height as f32),
+                },
+            },
+            content_mask: ContentMask {
+                bounds: Bounds {
+                    origin: crate::Point {
+                        x: ScaledPixels(0.0),
+                        y: ScaledPixels(0.0),
+                    },
+                    size: crate::Size {
+                        width: ScaledPixels(state.globals.viewport_size[0]),
+                        height: ScaledPixels(state.globals.viewport_size[1]),
+                    },
+                },
+            },
+            color: Hsla {
+                h: color[0],
+                s: color[1],
+                l: color[2],
+                a: color[3],
+            },
+            tile,
+            transformation: TransformationMatrix::unit(),
+        };
+
+        // Acquire frame
+        let frame = state.surface.acquire_frame();
+        if !frame.is_valid() {
+            log::warn!("Failed to acquire frame");
+            return;
+        }
+
+        // Begin encoding
+        state.command_encoder.start();
+        let target = frame.texture_view();
+
+        // Main render pass
+        {
+            let mut pass = state.command_encoder.render("main", gpu::RenderTargetSet {
+                colors: &[gpu::RenderTarget {
+                    view: target,
+                    init_op: gpu::InitOp::Clear(gpu::TextureColor::OpaqueBlack),
+                    finish_op: gpu::FinishOp::Store,
+                }],
+                depth_stencil: None,
+            });
+
+            // Get texture info for the sprite's texture
+            if let Some(tex_info) = state.atlas.get_texture_info(sprite.tile.texture_id) {
+                Self::draw_mono_sprites_internal(
+                    &mut pass,
+                    &[sprite],
+                    &state.globals,
+                    tex_info.view,
+                    state.atlas_sampler,
+                    state.mono_sprite_buffer,
+                    &state.mono_sprite_pipeline,
+                    &state.gpu,
+                );
+            } else {
+                log::warn!("No texture info for sprite tile");
+            }
+        }
+
+        // Queue frame for presentation
+        state.command_encoder.present(frame);
+
+        // Submit
+        let sync_point = state.gpu.submit(&mut state.command_encoder);
+        state.last_sync_point = Some(sync_point);
+
+        log::info!("Drew text '{}' at ({}, {}) size {}x{}", text, x, y, text_width, text_height);
+    }
+
+    /// Draw test text (non-WASM stub)
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn draw_test_text(&self, _text: &str, _x: f32, _y: f32, _font_size: f32, _color: [f32; 4]) {
+        // No-op on non-WASM
+    }
+
     /// Get the current drawable size
     pub fn drawable_size(&self) -> Size<DevicePixels> {
         self.0

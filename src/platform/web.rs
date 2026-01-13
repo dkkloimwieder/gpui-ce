@@ -8,6 +8,7 @@ pub(crate) mod events;
 pub mod event_listeners;
 mod platform;
 mod renderer;
+mod text_system;
 mod web_atlas;
 mod window;
 

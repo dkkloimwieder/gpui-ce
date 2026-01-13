@@ -4,10 +4,11 @@
 //! and web APIs for windowing, events, and text.
 
 use super::dispatcher::WebDispatcher;
+use super::text_system::WebTextSystem;
 use super::window::WebWindow;
 use crate::{
     AnyWindowHandle, BackgroundExecutor, ClipboardItem, CursorStyle, ForegroundExecutor, Keymap,
-    NoopTextSystem, Platform, PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper,
+    Platform, PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper,
     PlatformTextSystem, PlatformWindow, Task, WindowAppearance, WindowParams,
     DummyKeyboardMapper, Bounds, Pixels, DisplayId, point, px,
 };
@@ -72,7 +73,7 @@ impl WebPlatform {
         Rc::new(Self {
             background_executor,
             foreground_executor,
-            text_system: Arc::new(NoopTextSystem::new()),
+            text_system: Arc::new(WebTextSystem::new()),
             clipboard: Mutex::new(None),
             dispatcher,
             active_window: RefCell::new(None),
