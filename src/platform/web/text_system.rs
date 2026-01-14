@@ -87,8 +87,11 @@ impl WebTextSystem {
             // Start with reasonable size, will resize as needed
             canvas.set_width(512);
             canvas.set_height(128);
+            // Use willReadFrequently: true since we call getImageData for each glyph
+            let mut options = web_sys::ContextAttributes2d::new();
+            options.set_will_read_frequently(true);
             let context = canvas
-                .get_context("2d")
+                .get_context_with_context_options("2d", &options)
                 .expect("failed to get 2d context")
                 .expect("no 2d context")
                 .dyn_into::<web_sys::CanvasRenderingContext2d>()

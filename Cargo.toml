@@ -327,6 +327,7 @@ web-sys = { version = "0.3", optional = true, features = [
     "AddEventListenerOptions",
     # Text rendering via Canvas 2D
     "CanvasRenderingContext2d",
+    "ContextAttributes2d",
     "TextMetrics",
     "ImageData",
 ] }
@@ -339,6 +340,8 @@ gpui_util_wasm = { path = "../gpui-util-wasm" }
 console_error_panic_hook = "0.1"
 # console_log for log output in browser
 console_log = "1"
+# web-time provides WASM-compatible Instant/Duration
+web-time = "1"
 
 [dev-dependencies]
 backtrace = "0.3"

@@ -458,24 +458,42 @@ impl WebRenderer {
             });
 
             // Process batches from scene
+            let mut quad_count = 0;
+            let mut mono_sprite_count = 0;
+            let mut poly_sprite_count = 0;
+            let mut other_batch_count = 0;
+            let mut batch_index = 0;
+            // Track buffer offsets for each batch to avoid overwrites
+            // (deferred sync means all batches must use different buffer regions)
+            let mut quad_buffer_offset: u64 = 0;
+            let mut mono_sprite_buffer_offset: u64 = 0;
+            let mut poly_sprite_buffer_offset: u64 = 0;
+
             for batch in scene.batches() {
                 match batch {
                     PrimitiveBatch::Quads(quads) => {
-                        Self::draw_quads_internal(
+                        quad_count += quads.len();
+                        // Log quad batch info (reduced verbosity)
+                        log::debug!("BATCH[{}]: Quads batch with {} quads at offset {}",
+                            batch_index, quads.len(), quad_buffer_offset);
+                        let new_offset = Self::draw_quads_internal(
                             &mut pass,
                             quads,
+                            quad_buffer_offset,
                             &state.globals,
-                            state.globals_buffer,
                             state.quad_buffer,
                             &state.quad_pipeline,
                             &state.gpu,
                         );
+                        quad_buffer_offset = new_offset;
                     }
                     PrimitiveBatch::MonochromeSprites { texture_id, sprites } => {
+                        mono_sprite_count += sprites.len();
                         if let Some(tex_info) = state.atlas.get_texture_info(texture_id) {
-                            Self::draw_mono_sprites_internal(
+                            let new_offset = Self::draw_mono_sprites_internal(
                                 &mut pass,
                                 sprites,
+                                mono_sprite_buffer_offset,
                                 &state.globals,
                                 tex_info.view,
                                 state.atlas_sampler,
@@ -483,13 +501,18 @@ impl WebRenderer {
                                 &state.mono_sprite_pipeline,
                                 &state.gpu,
                             );
+                            mono_sprite_buffer_offset = new_offset;
+                        } else {
+                            log::warn!("No texture info for monochrome sprite batch texture {:?}", texture_id);
                         }
                     }
                     PrimitiveBatch::PolychromeSprites { texture_id, sprites } => {
+                        poly_sprite_count += sprites.len();
                         if let Some(tex_info) = state.atlas.get_texture_info(texture_id) {
-                            Self::draw_poly_sprites_internal(
+                            let new_offset = Self::draw_poly_sprites_internal(
                                 &mut pass,
                                 sprites,
+                                poly_sprite_buffer_offset,
                                 &state.globals,
                                 tex_info.view,
                                 state.atlas_sampler,
@@ -497,11 +520,25 @@ impl WebRenderer {
                                 &state.poly_sprite_pipeline,
                                 &state.gpu,
                             );
+                            poly_sprite_buffer_offset = new_offset;
+                        } else {
+                            log::warn!("No texture info for polychrome sprite batch texture {:?}", texture_id);
                         }
                     }
                     // TODO: Other primitive types (shadows, paths, underlines, surfaces)
-                    _ => {}
+                    _ => {
+                        other_batch_count += 1;
+                    }
                 }
+                batch_index += 1;
+            }
+
+            if quad_count > 0 || mono_sprite_count > 0 || poly_sprite_count > 0 || other_batch_count > 0 {
+                log::debug!(
+                    "WebRenderer::draw: {} quads, {} mono sprites, {} poly sprites, {} other batches (viewport: {:?})",
+                    quad_count, mono_sprite_count, poly_sprite_count, other_batch_count,
+                    state.globals.viewport_size
+                );
             }
         }
 
@@ -513,34 +550,51 @@ impl WebRenderer {
         state.last_sync_point = Some(sync_point);
     }
 
+    /// WebGPU requires storage buffer offsets to be aligned to minStorageBufferOffsetAlignment (256 bytes)
+    const STORAGE_BUFFER_ALIGNMENT: u64 = 256;
+
     /// Internal helper to draw quads during a render pass
+    /// Returns the new buffer offset for the next batch
     #[cfg(target_arch = "wasm32")]
     fn draw_quads_internal(
         pass: &mut gpu::RenderCommandEncoder,
         quads: &[Quad],
+        buffer_offset: u64,
         globals: &GlobalParams,
-        globals_buffer: gpu::Buffer,
         quad_buffer: gpu::Buffer,
         pipeline: &gpu::RenderPipeline,
         gpu: &gpu::Context,
-    ) {
+    ) -> u64 {
         if quads.is_empty() {
-            return;
+            return buffer_offset;
         }
 
         let count = quads.len().min(MAX_QUADS_PER_BATCH);
+        let quad_size = mem::size_of::<Quad>() as u64;
+        let data_size = count as u64 * quad_size;
 
-        // Upload quad data to buffer
-        unsafe {
-            ptr::copy_nonoverlapping(
-                quads.as_ptr(),
-                quad_buffer.data() as *mut Quad,
-                count,
-            );
+        // Check if we have room in the buffer
+        let max_offset = (MAX_QUADS_PER_BATCH as u64) * quad_size;
+        if buffer_offset + data_size > max_offset {
+            log::warn!("Quad buffer overflow! offset={}, size={}, max={}",
+                buffer_offset, data_size, max_offset);
+            return buffer_offset;
         }
-        gpu.sync_buffer(quad_buffer);
 
-        // Bind pipeline and data
+        log::debug!(
+            "draw_quads_internal: drawing {} quads at offset {}, viewport={:?}",
+            count, buffer_offset, globals.viewport_size
+        );
+
+        // Upload quad data to buffer at the specified offset
+        unsafe {
+            let dst = (quad_buffer.data() as *mut u8).add(buffer_offset as usize) as *mut Quad;
+            ptr::copy_nonoverlapping(quads.as_ptr(), dst, count);
+        }
+        // Mark the specific range as dirty for efficient sync
+        gpu.sync_buffer_range(quad_buffer, buffer_offset, data_size);
+
+        // Bind pipeline and data with the correct buffer offset
         let mut encoder = pass.with(pipeline);
         encoder.bind(
             0,
@@ -548,42 +602,55 @@ impl WebRenderer {
                 globals: *globals,
                 b_quads: gpu::BufferPiece {
                     buffer: quad_buffer,
-                    offset: 0,
+                    offset: buffer_offset,
                 },
             },
         );
 
         // Draw instanced quads (4 vertices per quad, N instances)
         encoder.draw(0, 4, 0, count as u32);
+
+        // Return the new offset for the next batch, aligned to storage buffer alignment
+        let next_offset = buffer_offset + data_size;
+        (next_offset + Self::STORAGE_BUFFER_ALIGNMENT - 1) & !(Self::STORAGE_BUFFER_ALIGNMENT - 1)
     }
 
     /// Internal helper to draw monochrome sprites during a render pass
+    /// Returns the new buffer offset for the next batch
     #[cfg(target_arch = "wasm32")]
     fn draw_mono_sprites_internal(
         pass: &mut gpu::RenderCommandEncoder,
         sprites: &[MonochromeSprite],
+        buffer_offset: u64,
         globals: &GlobalParams,
         texture_view: gpu::TextureView,
         sampler: gpu::Sampler,
         sprite_buffer: gpu::Buffer,
         pipeline: &gpu::RenderPipeline,
         gpu: &Rc<gpu::Context>,
-    ) {
+    ) -> u64 {
         if sprites.is_empty() {
-            return;
+            return buffer_offset;
         }
 
         let count = sprites.len().min(MAX_SPRITES_PER_BATCH);
+        let sprite_size = mem::size_of::<MonochromeSprite>() as u64;
+        let data_size = count as u64 * sprite_size;
 
-        // Upload sprite data to buffer
-        unsafe {
-            ptr::copy_nonoverlapping(
-                sprites.as_ptr(),
-                sprite_buffer.data() as *mut MonochromeSprite,
-                count,
-            );
+        // Check if we have room in the buffer
+        let max_offset = (MAX_SPRITES_PER_BATCH as u64) * sprite_size;
+        if buffer_offset + data_size > max_offset {
+            log::warn!("Mono sprite buffer overflow! offset={}, size={}, max={}",
+                buffer_offset, data_size, max_offset);
+            return buffer_offset;
         }
-        gpu.sync_buffer(sprite_buffer);
+
+        // Upload sprite data to buffer at the specified offset
+        unsafe {
+            let dst = (sprite_buffer.data() as *mut u8).add(buffer_offset as usize) as *mut MonochromeSprite;
+            ptr::copy_nonoverlapping(sprites.as_ptr(), dst, count);
+        }
+        gpu.sync_buffer_range(sprite_buffer, buffer_offset, data_size);
 
         // Bind pipeline and data
         let mut encoder = pass.with(pipeline);
@@ -595,42 +662,55 @@ impl WebRenderer {
                 s_sprite: sampler,
                 b_mono_sprites: gpu::BufferPiece {
                     buffer: sprite_buffer,
-                    offset: 0,
+                    offset: buffer_offset,
                 },
             },
         );
 
         // Draw instanced sprites (4 vertices per sprite, N instances)
         encoder.draw(0, 4, 0, count as u32);
+
+        // Return the new offset for the next batch, aligned to storage buffer alignment
+        let next_offset = buffer_offset + data_size;
+        (next_offset + Self::STORAGE_BUFFER_ALIGNMENT - 1) & !(Self::STORAGE_BUFFER_ALIGNMENT - 1)
     }
 
     /// Internal helper to draw polychrome sprites during a render pass
+    /// Returns the new buffer offset for the next batch
     #[cfg(target_arch = "wasm32")]
     fn draw_poly_sprites_internal(
         pass: &mut gpu::RenderCommandEncoder,
         sprites: &[PolychromeSprite],
+        buffer_offset: u64,
         globals: &GlobalParams,
         texture_view: gpu::TextureView,
         sampler: gpu::Sampler,
         sprite_buffer: gpu::Buffer,
         pipeline: &gpu::RenderPipeline,
         gpu: &Rc<gpu::Context>,
-    ) {
+    ) -> u64 {
         if sprites.is_empty() {
-            return;
+            return buffer_offset;
         }
 
         let count = sprites.len().min(MAX_SPRITES_PER_BATCH);
+        let sprite_size = mem::size_of::<PolychromeSprite>() as u64;
+        let data_size = count as u64 * sprite_size;
 
-        // Upload sprite data to buffer
-        unsafe {
-            ptr::copy_nonoverlapping(
-                sprites.as_ptr(),
-                sprite_buffer.data() as *mut PolychromeSprite,
-                count,
-            );
+        // Check if we have room in the buffer
+        let max_offset = (MAX_SPRITES_PER_BATCH as u64) * sprite_size;
+        if buffer_offset + data_size > max_offset {
+            log::warn!("Poly sprite buffer overflow! offset={}, size={}, max={}",
+                buffer_offset, data_size, max_offset);
+            return buffer_offset;
         }
-        gpu.sync_buffer(sprite_buffer);
+
+        // Upload sprite data to buffer at the specified offset
+        unsafe {
+            let dst = (sprite_buffer.data() as *mut u8).add(buffer_offset as usize) as *mut PolychromeSprite;
+            ptr::copy_nonoverlapping(sprites.as_ptr(), dst, count);
+        }
+        gpu.sync_buffer_range(sprite_buffer, buffer_offset, data_size);
 
         // Bind pipeline and data
         let mut encoder = pass.with(pipeline);
@@ -642,13 +722,17 @@ impl WebRenderer {
                 s_sprite: sampler,
                 b_poly_sprites: gpu::BufferPiece {
                     buffer: sprite_buffer,
-                    offset: 0,
+                    offset: buffer_offset,
                 },
             },
         );
 
         // Draw instanced sprites (4 vertices per sprite, N instances)
         encoder.draw(0, 4, 0, count as u32);
+
+        // Return the new offset for the next batch, aligned to storage buffer alignment
+        let next_offset = buffer_offset + data_size;
+        (next_offset + Self::STORAGE_BUFFER_ALIGNMENT - 1) & !(Self::STORAGE_BUFFER_ALIGNMENT - 1)
     }
 
     /// Draw a scene (non-WASM stub)
@@ -859,8 +943,8 @@ impl WebRenderer {
             Self::draw_quads_internal(
                 &mut pass,
                 &[quad],
+                0, // buffer_offset
                 &state.globals,
-                state.globals_buffer,
                 state.quad_buffer,
                 &state.quad_pipeline,
                 &state.gpu,
@@ -1051,6 +1135,7 @@ impl WebRenderer {
                 Self::draw_mono_sprites_internal(
                     &mut pass,
                     &[sprite],
+                    0, // buffer_offset
                     &state.globals,
                     tex_info.view,
                     state.atlas_sampler,

@@ -48,8 +48,14 @@ use std::{
         Arc, Weak,
         atomic::{AtomicUsize, Ordering::SeqCst},
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
+
+// Use web-time for WASM (provides Instant via performance.now())
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
 use crate::util::post_inc;
 use crate::util::{ResultExt, measure};
 use uuid::Uuid;
@@ -1077,6 +1083,9 @@ impl Window {
             let next_frame_callbacks = next_frame_callbacks.clone();
             let last_input_timestamp = last_input_timestamp.clone();
             move |request_frame_options| {
+                #[cfg(target_arch = "wasm32")]
+                log::debug!("request_frame callback invoked");
+
                 let next_frame_callbacks = next_frame_callbacks.take();
                 if !next_frame_callbacks.is_empty() {
                     handle
@@ -1095,16 +1104,29 @@ impl Window {
                     || (active.get()
                         && last_input_timestamp.get().elapsed() < Duration::from_secs(1));
 
-                if invalidator.is_dirty() || request_frame_options.force_render {
+                let is_dirty = invalidator.is_dirty();
+                #[cfg(target_arch = "wasm32")]
+                log::debug!(
+                    "request_frame: is_dirty={}, force_render={}, needs_present={}",
+                    is_dirty, request_frame_options.force_render, needs_present
+                );
+
+                if is_dirty || request_frame_options.force_render {
                     measure("frame duration", || {
-                        handle
+                        #[cfg(target_arch = "wasm32")]
+                        log::debug!("request_frame: calling window.draw()");
+                        let result = handle
                             .update(&mut cx, |_, window, cx| {
                                 let arena_clear_needed = window.draw(cx);
                                 window.present();
                                 // drop the arena elements after present to reduce latency
                                 arena_clear_needed.clear();
-                            })
-                            .log_err();
+                            });
+                        #[cfg(target_arch = "wasm32")]
+                        if let Err(ref e) = result {
+                            log::error!("request_frame: handle.update failed: {:?}", e);
+                        }
+                        result.log_err();
                     })
                 } else if needs_present {
                     handle
@@ -2093,12 +2115,24 @@ impl Window {
 
     #[profiling::function]
     fn present(&self) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let batch_count = self.rendered_frame.scene.batches().count();
+            log::debug!("present: scene has {} batches", batch_count);
+        }
         self.platform_window.draw(&self.rendered_frame.scene);
         self.needs_present.set(false);
         profiling::finish_frame!();
     }
 
     fn draw_roots(&mut self, cx: &mut App) {
+        #[cfg(target_arch = "wasm32")]
+        log::debug!(
+            "draw_roots: viewport_size={:?}, has_root={}",
+            self.viewport_size,
+            self.root.is_some()
+        );
+
         self.invalidator.set_phase(DrawPhase::Prepaint);
         self.tooltip_bounds.take();
 

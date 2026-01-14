@@ -96,6 +96,8 @@ pub use web::{
     WebSurfaceConfig,
     event_listeners,
     get_canvas_element,
+    set_pending_renderer,
+    set_window_renderer,
 };
 
 #[cfg(all(target_os = "linux", feature = "wayland"))]

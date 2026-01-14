@@ -186,33 +186,38 @@ fn should_allow_browser_default(key: &str) -> bool {
 #[cfg(target_arch = "wasm32")]
 pub fn start_animation_loop(window: Rc<WebWindow>) -> Result<(), JsValue> {
     // Use a shared reference for the recursive closure
-    let f: Rc<std::cell::RefCell<Option<Closure<dyn FnMut()>>>> =
+    // IMPORTANT: We use Rc<RefCell<Option<Closure>>> pattern to allow the closure
+    // to reference itself for scheduling the next frame
+    let callback: Rc<std::cell::RefCell<Option<Closure<dyn FnMut()>>>> =
         Rc::new(std::cell::RefCell::new(None));
-    let g = f.clone();
+    let callback_clone = callback.clone();
 
     let browser_window = web_sys::window().ok_or_else(|| JsValue::from_str("No window"))?;
 
-    *g.borrow_mut() = Some(Closure::new(move || {
+    // Create the closure that will call itself recursively
+    let closure = Closure::new(move || {
         // Request the frame from GPUI
         window.request_frame();
 
-        // Schedule next frame
+        // Schedule next frame using the cloned reference
         if let Some(browser_window) = web_sys::window() {
-            if let Some(ref closure) = *f.borrow() {
-                let _ = browser_window.request_animation_frame(closure.as_ref().unchecked_ref());
+            if let Some(ref cb) = *callback_clone.borrow() {
+                let _ = browser_window.request_animation_frame(cb.as_ref().unchecked_ref());
             }
         }
-    }));
+    });
+
+    // Store the closure in the shared cell so the recursive reference works
+    *callback.borrow_mut() = Some(closure);
 
     // Start the loop
-    if let Some(ref closure) = *g.borrow() {
-        browser_window.request_animation_frame(closure.as_ref().unchecked_ref())?;
+    if let Some(ref cb) = *callback.borrow() {
+        browser_window.request_animation_frame(cb.as_ref().unchecked_ref())?;
     }
 
-    // Leak the closure - it needs to live forever
-    if let Some(closure) = g.borrow_mut().take() {
-        closure.forget();
-    }
+    // Leak the Rc to keep the closure alive forever
+    // (The closure is stored inside the RefCell, so leaking the Rc keeps it alive)
+    std::mem::forget(callback);
 
     Ok(())
 }

@@ -77,6 +77,9 @@ pub(crate) struct WebWindowState {
     pub(crate) last_mouse_down_button: Option<i16>,
     /// Current click count
     pub(crate) click_count: usize,
+    /// Event listeners (must be kept alive)
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) event_listeners: Option<super::event_listeners::EventListeners>,
 }
 
 /// Web window - wraps browser canvas element
@@ -97,9 +100,29 @@ impl WebWindow {
         let scale_factor = get_device_pixel_ratio();
 
         // Get canvas size or use params bounds
-        let (width, height) = (
-            canvas.client_width() as f32,
-            canvas.client_height() as f32,
+        let client_width = canvas.client_width() as f32;
+        let client_height = canvas.client_height() as f32;
+
+        // If client size is 0, use the canvas buffer size or fallback to reasonable defaults
+        let (width, height) = if client_width > 0.0 && client_height > 0.0 {
+            (client_width, client_height)
+        } else {
+            // Canvas not laid out yet, use buffer size or params
+            let buf_width = canvas.width() as f32;
+            let buf_height = canvas.height() as f32;
+            if buf_width > 0.0 && buf_height > 0.0 {
+                (buf_width, buf_height)
+            } else {
+                // Use params bounds size as fallback
+                (params.bounds.size.width.0, params.bounds.size.height.0)
+            }
+        };
+
+        log::info!(
+            "WebWindow::new: canvas client={}x{}, buffer={}x{}, using size={}x{}, scale={}",
+            client_width, client_height,
+            canvas.width(), canvas.height(),
+            width, height, scale_factor
         );
 
         // Set canvas dimensions to match client size with device pixel ratio
@@ -107,6 +130,8 @@ impl WebWindow {
         let device_height = (height * scale_factor) as u32;
         canvas.set_width(device_width);
         canvas.set_height(device_height);
+
+        log::info!("WebWindow::new: set canvas buffer to {}x{}", device_width, device_height);
 
         // Use canvas size for bounds
         let bounds = crate::Bounds {
@@ -143,6 +168,7 @@ impl WebWindow {
             last_mouse_down_time: None,
             last_mouse_down_button: None,
             click_count: 0,
+            event_listeners: None,
         })))
     }
 
@@ -191,6 +217,24 @@ impl WebWindow {
     #[cfg(target_arch = "wasm32")]
     pub fn canvas(&self) -> Option<web_sys::HtmlCanvasElement> {
         self.0.lock().canvas.clone()
+    }
+
+    /// Set up browser event listeners for this window
+    #[cfg(target_arch = "wasm32")]
+    pub fn setup_event_listeners(self: &Rc<Self>) {
+        if let Some(canvas) = self.canvas() {
+            match super::event_listeners::setup_event_listeners(&canvas, Rc::new(self.as_ref().clone())) {
+                Ok(listeners) => {
+                    self.0.lock().event_listeners = Some(listeners);
+                    log::info!("Event listeners set up successfully");
+                }
+                Err(e) => {
+                    log::error!("Failed to set up event listeners: {:?}", e);
+                }
+            }
+        } else {
+            log::error!("No canvas to set up event listeners on");
+        }
     }
 
     /// Set the WebGPU renderer after async initialization
@@ -252,11 +296,14 @@ impl WebWindow {
         let mut state = self.0.lock();
         if let Some(callback) = state.input_callback.take() {
             drop(state);
+            log::debug!("Dispatching input event: {:?}", std::mem::discriminant(&input));
             let mut callback = callback;
             let result = callback(input);
+            log::debug!("Input event dispatched, result: {:?}", result);
             self.0.lock().input_callback = Some(callback);
             result
         } else {
+            log::warn!("No input callback registered - event dropped");
             crate::DispatchEventResult::default()
         }
     }
@@ -647,6 +694,10 @@ impl PlatformWindow for WebWindow {
     fn draw(&self, scene: &Scene) {
         #[cfg(target_arch = "wasm32")]
         {
+            // Log scene contents for debugging
+            let batch_count = scene.batches().count();
+            log::debug!("WebWindow::draw called with scene containing {} batches", batch_count);
+
             // Clone the renderer while holding the lock, then release lock before drawing
             let renderer = {
                 let state = self.0.lock();

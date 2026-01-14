@@ -20,8 +20,14 @@ use std::{
     },
     task::{Context, Poll},
     thread::{self, ThreadId},
-    time::{Duration, Instant},
+    time::Duration,
 };
+
+// Use web-time for WASM (provides Instant via performance.now())
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
 use crate::util::TryFutureExt;
 use waker_fn::waker_fn;
 
@@ -569,7 +575,15 @@ impl BackgroundExecutor {
     /// Calling this instead of `std::time::Instant::now` allows the use
     /// of fake timers in tests.
     pub fn now(&self) -> Instant {
-        self.dispatcher.now()
+        // On WASM, use web_time::Instant directly (dispatcher returns std::time::Instant)
+        #[cfg(target_arch = "wasm32")]
+        {
+            Instant::now()
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.dispatcher.now()
+        }
     }
 
     /// Returns a task that will complete after the given duration.

@@ -64,6 +64,9 @@ pub(crate) struct WebPlatform {
     next_canvas_id: RefCell<u32>,
     /// Current cursor style
     cursor_style: RefCell<CursorStyle>,
+    /// Pre-initialized renderer (set before opening windows)
+    #[cfg(target_arch = "wasm32")]
+    pending_renderer: RefCell<Option<super::renderer::WebRenderer>>,
 }
 
 impl WebPlatform {
@@ -80,8 +83,60 @@ impl WebPlatform {
             display: Rc::new(WebDisplay::new()),
             next_canvas_id: RefCell::new(1),
             cursor_style: RefCell::new(CursorStyle::Arrow),
+            #[cfg(target_arch = "wasm32")]
+            pending_renderer: RefCell::new(None),
         })
     }
+
+    /// Get the active web window (if any)
+    #[cfg(target_arch = "wasm32")]
+    pub fn get_active_web_window(&self) -> Option<WebWindow> {
+        self.active_window.borrow().clone()
+    }
+
+    /// Set a pre-initialized renderer to be used by windows
+    #[cfg(target_arch = "wasm32")]
+    pub fn set_pending_renderer(&self, renderer: super::renderer::WebRenderer) {
+        *self.pending_renderer.borrow_mut() = Some(renderer);
+    }
+
+    /// Take the pending renderer (removes it from storage)
+    #[cfg(target_arch = "wasm32")]
+    pub fn take_pending_renderer(&self) -> Option<super::renderer::WebRenderer> {
+        self.pending_renderer.borrow_mut().take()
+    }
+}
+
+/// Set a pre-initialized renderer BEFORE opening windows
+/// This ensures the GPU atlas is available for text rasterization from the start
+#[cfg(target_arch = "wasm32")]
+pub fn set_pending_renderer(renderer: super::renderer::WebRenderer) {
+    PLATFORM.with(|platform| {
+        if let Some(ref p) = *platform.borrow() {
+            p.set_pending_renderer(renderer);
+            log::info!("Pending renderer set on platform");
+        } else {
+            log::warn!("Platform not initialized - cannot set pending renderer");
+        }
+    });
+}
+
+/// Set the active renderer on the currently active window
+/// This should be called after initializing the WebRenderer
+#[cfg(target_arch = "wasm32")]
+pub fn set_window_renderer(renderer: super::renderer::WebRenderer) {
+    PLATFORM.with(|platform| {
+        if let Some(ref p) = *platform.borrow() {
+            if let Some(window) = p.get_active_web_window() {
+                window.set_renderer(renderer);
+                log::info!("Renderer attached to active window");
+            } else {
+                log::warn!("No active window to attach renderer to");
+            }
+        } else {
+            log::warn!("Platform not initialized");
+        }
+    });
 }
 
 impl Platform for WebPlatform {
@@ -161,8 +216,37 @@ impl Platform for WebPlatform {
             options,
             self.display.clone(),
             canvas_id,
-            canvas,
+            canvas.clone(),
         );
+
+        // If a renderer was pre-initialized, attach it to the window immediately
+        // This ensures the GPU atlas is available for text rasterization
+        if let Some(renderer) = self.take_pending_renderer() {
+            log::info!("Attaching pre-initialized renderer to new window");
+            window.set_renderer(renderer);
+        }
+
+        // Set up event listeners
+        let window_rc = std::rc::Rc::new(window.clone());
+        match super::event_listeners::setup_event_listeners(&canvas, window_rc.clone()) {
+            Ok(listeners) => {
+                window.0.lock().event_listeners = Some(listeners);
+                log::info!("Event listeners set up successfully");
+            }
+            Err(e) => {
+                log::error!("Failed to set up event listeners: {:?}", e);
+            }
+        }
+
+        // Start animation loop for continuous rendering
+        match super::event_listeners::start_animation_loop(window_rc) {
+            Ok(()) => {
+                log::info!("Animation loop started");
+            }
+            Err(e) => {
+                log::error!("Failed to start animation loop: {:?}", e);
+            }
+        }
 
         // Store as active window
         *self.active_window.borrow_mut() = Some(window.clone());

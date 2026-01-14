@@ -17,6 +17,10 @@ pub(crate) use platform::current_platform;
 pub use platform::DEFAULT_CANVAS_ID;
 #[cfg(target_arch = "wasm32")]
 pub use platform::get_canvas_element;
+#[cfg(target_arch = "wasm32")]
+pub use platform::set_pending_renderer;
+#[cfg(target_arch = "wasm32")]
+pub use platform::set_window_renderer;
 pub use renderer::{GlobalParams, WebRenderer, WebRendererState, WebSurfaceConfig};
 pub use web_atlas::{WebGpuAtlas, WebAtlasTextureInfo};
 pub(crate) use window::WebWindow;

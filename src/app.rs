@@ -7,8 +7,21 @@ use std::{
     path::{Path, PathBuf},
     rc::{Rc, Weak},
     sync::{Arc, atomic::Ordering::SeqCst},
-    time::{Duration, Instant},
+    time::Duration,
 };
+
+// On WASM, we need to keep the App alive after run() returns.
+// Store a strong reference here to prevent the AppCell from being dropped.
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    static WASM_APP_KEEPER: RefCell<Option<Rc<AppCell>>> = const { RefCell::new(None) };
+}
+
+// Use web-time for WASM (provides Instant via performance.now())
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
 
 use anyhow::{Context as _, Result, anyhow};
 use derive_more::{Deref, DerefMut};
@@ -189,8 +202,24 @@ impl Application {
         let this = self.0.clone();
         let platform = self.0.borrow().platform.clone();
         platform.run(Box::new(move || {
-            let cx = &mut *this.borrow_mut();
-            on_finish_launching(cx);
+            {
+                let cx = &mut *this.borrow_mut();
+                on_finish_launching(cx);
+            }
+
+            // On WASM, keep the app alive after run() returns.
+            // Browser events will continue to dispatch to the app.
+            #[cfg(target_arch = "wasm32")]
+            {
+                log::info!(
+                    "WASM: Storing App in thread_local to keep it alive. Strong count: {}",
+                    std::rc::Rc::strong_count(&this)
+                );
+                // Store the Rc in a thread_local to prevent it from being dropped
+                WASM_APP_KEEPER.with(|keeper| {
+                    *keeper.borrow_mut() = Some(this);
+                });
+            }
         }));
     }
 
@@ -1460,6 +1489,12 @@ impl App {
     /// Creates an `AsyncApp`, which can be cloned and has a static lifetime
     /// so it can be held across `await` points.
     pub fn to_async(&self) -> AsyncApp {
+        #[cfg(target_arch = "wasm32")]
+        log::debug!(
+            "Creating AsyncApp, weak strong_count: {:?}, weak_count: {:?}",
+            self.this.strong_count(),
+            self.this.weak_count()
+        );
         AsyncApp {
             app: self.this.clone(),
             background_executor: self.background_executor.clone(),
