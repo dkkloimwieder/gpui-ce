@@ -387,6 +387,9 @@ impl BackgroundExecutor {
 
     /// Block the current thread until the given future resolves.
     /// Consider using `block_with_timeout` instead.
+    ///
+    /// Note: On WASM, blocking is not supported and this will panic.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn block<R>(&self, future: impl Future<Output = R>) -> R {
         if let Ok(value) = self.block_internal(true, future, None) {
             value
@@ -395,13 +398,22 @@ impl BackgroundExecutor {
         }
     }
 
-    #[cfg(not(any(test, feature = "test-support")))]
+    /// On WASM, blocking is not supported.
+    #[cfg(target_arch = "wasm32")]
+    pub fn block<R>(&self, _future: impl Future<Output = R>) -> R {
+        panic!("block() is not supported on WASM - use async/await instead");
+    }
+
+    #[cfg(all(not(any(test, feature = "test-support")), not(target_arch = "wasm32")))]
     pub(crate) fn block_internal<Fut: Future>(
         &self,
         _background_only: bool,
         future: Fut,
         timeout: Option<Duration>,
     ) -> Result<Fut::Output, impl Future<Output = Fut::Output> + use<Fut>> {
+        #[cfg(target_arch = "wasm32")]
+        use web_time::Instant;
+        #[cfg(not(target_arch = "wasm32"))]
         use std::time::Instant;
 
         let mut future = Box::pin(future);
@@ -528,12 +540,27 @@ impl BackgroundExecutor {
 
     /// Block the current thread until the given future resolves
     /// or `duration` has elapsed.
+    ///
+    /// Note: On WASM, blocking is not supported and this will panic.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn block_with_timeout<Fut: Future>(
         &self,
         duration: Duration,
         future: Fut,
     ) -> Result<Fut::Output, impl Future<Output = Fut::Output> + use<Fut>> {
         self.block_internal(true, future, Some(duration))
+    }
+
+    /// On WASM, blocking is not supported.
+    #[cfg(target_arch = "wasm32")]
+    pub fn block_with_timeout<Fut: Future>(
+        &self,
+        _duration: Duration,
+        future: Fut,
+    ) -> Result<Fut::Output, Fut> {
+        // On WASM we can't block, so just return the future as an error
+        // to indicate the timeout couldn't be enforced
+        Err(future)
     }
 
     /// Scoped lets you start a number of tasks and waits

@@ -458,11 +458,6 @@ impl WebRenderer {
             });
 
             // Process batches from scene
-            let mut quad_count = 0;
-            let mut mono_sprite_count = 0;
-            let mut poly_sprite_count = 0;
-            let mut other_batch_count = 0;
-            let mut batch_index = 0;
             // Track buffer offsets for each batch to avoid overwrites
             // (deferred sync means all batches must use different buffer regions)
             let mut quad_buffer_offset: u64 = 0;
@@ -472,10 +467,6 @@ impl WebRenderer {
             for batch in scene.batches() {
                 match batch {
                     PrimitiveBatch::Quads(quads) => {
-                        quad_count += quads.len();
-                        // Log quad batch info (reduced verbosity)
-                        log::debug!("BATCH[{}]: Quads batch with {} quads at offset {}",
-                            batch_index, quads.len(), quad_buffer_offset);
                         let new_offset = Self::draw_quads_internal(
                             &mut pass,
                             quads,
@@ -488,7 +479,6 @@ impl WebRenderer {
                         quad_buffer_offset = new_offset;
                     }
                     PrimitiveBatch::MonochromeSprites { texture_id, sprites } => {
-                        mono_sprite_count += sprites.len();
                         if let Some(tex_info) = state.atlas.get_texture_info(texture_id) {
                             let new_offset = Self::draw_mono_sprites_internal(
                                 &mut pass,
@@ -507,7 +497,6 @@ impl WebRenderer {
                         }
                     }
                     PrimitiveBatch::PolychromeSprites { texture_id, sprites } => {
-                        poly_sprite_count += sprites.len();
                         if let Some(tex_info) = state.atlas.get_texture_info(texture_id) {
                             let new_offset = Self::draw_poly_sprites_internal(
                                 &mut pass,
@@ -526,19 +515,8 @@ impl WebRenderer {
                         }
                     }
                     // TODO: Other primitive types (shadows, paths, underlines, surfaces)
-                    _ => {
-                        other_batch_count += 1;
-                    }
+                    _ => {}
                 }
-                batch_index += 1;
-            }
-
-            if quad_count > 0 || mono_sprite_count > 0 || poly_sprite_count > 0 || other_batch_count > 0 {
-                log::debug!(
-                    "WebRenderer::draw: {} quads, {} mono sprites, {} poly sprites, {} other batches (viewport: {:?})",
-                    quad_count, mono_sprite_count, poly_sprite_count, other_batch_count,
-                    state.globals.viewport_size
-                );
             }
         }
 

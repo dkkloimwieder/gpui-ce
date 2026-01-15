@@ -296,14 +296,11 @@ impl WebWindow {
         let mut state = self.0.lock();
         if let Some(callback) = state.input_callback.take() {
             drop(state);
-            log::debug!("Dispatching input event: {:?}", std::mem::discriminant(&input));
             let mut callback = callback;
             let result = callback(input);
-            log::debug!("Input event dispatched, result: {:?}", result);
             self.0.lock().input_callback = Some(callback);
             result
         } else {
-            log::warn!("No input callback registered - event dropped");
             crate::DispatchEventResult::default()
         }
     }
@@ -341,9 +338,13 @@ impl WebWindow {
 
         drop(state);
 
+        let pos_x = event.offset_x() as f32;
+        let pos_y = event.offset_y() as f32;
+        log::info!("MOUSE DOWN at ({}, {}), button={}, click_count={}", pos_x, pos_y, button, click_count);
+
         let input = PlatformInput::MouseDown(crate::MouseDownEvent {
             button: mouse_button_from_browser(button),
-            position: point(px(event.offset_x() as f32), px(event.offset_y() as f32)),
+            position: point(px(pos_x), px(pos_y)),
             modifiers: modifiers_from_mouse_event(event),
             click_count,
             first_mouse: false,
@@ -694,25 +695,17 @@ impl PlatformWindow for WebWindow {
     fn draw(&self, scene: &Scene) {
         #[cfg(target_arch = "wasm32")]
         {
-            // Log scene contents for debugging
-            let batch_count = scene.batches().count();
-            log::debug!("WebWindow::draw called with scene containing {} batches", batch_count);
-
-            // Clone the renderer while holding the lock, then release lock before drawing
             let renderer = {
                 let state = self.0.lock();
                 state.renderer.clone()
             };
             if let Some(renderer) = renderer {
                 renderer.draw(scene);
-            } else {
-                log::warn!("WebWindow::draw called before renderer is initialized");
             }
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
             let _ = scene;
-            // No-op on non-WASM
         }
     }
 

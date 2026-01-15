@@ -882,6 +882,10 @@ pub struct Window {
     active: Rc<Cell<bool>>,
     hovered: Rc<Cell<bool>>,
     pub(crate) needs_present: Rc<Cell<bool>>,
+    /// Tracks whether the scene needs to be sent to the platform renderer.
+    /// Set to true after draw(), set to false after platform_window.draw() is called.
+    /// This prevents re-uploading unchanged scene data on every present().
+    scene_needs_render: bool,
     pub(crate) last_input_timestamp: Rc<Cell<Instant>>,
     last_input_modality: InputModality,
     pub(crate) refreshing: bool,
@@ -1083,9 +1087,6 @@ impl Window {
             let next_frame_callbacks = next_frame_callbacks.clone();
             let last_input_timestamp = last_input_timestamp.clone();
             move |request_frame_options| {
-                #[cfg(target_arch = "wasm32")]
-                log::debug!("request_frame callback invoked");
-
                 let next_frame_callbacks = next_frame_callbacks.take();
                 if !next_frame_callbacks.is_empty() {
                     handle
@@ -1105,16 +1106,9 @@ impl Window {
                         && last_input_timestamp.get().elapsed() < Duration::from_secs(1));
 
                 let is_dirty = invalidator.is_dirty();
-                #[cfg(target_arch = "wasm32")]
-                log::debug!(
-                    "request_frame: is_dirty={}, force_render={}, needs_present={}",
-                    is_dirty, request_frame_options.force_render, needs_present
-                );
 
                 if is_dirty || request_frame_options.force_render {
                     measure("frame duration", || {
-                        #[cfg(target_arch = "wasm32")]
-                        log::debug!("request_frame: calling window.draw()");
                         let result = handle
                             .update(&mut cx, |_, window, cx| {
                                 let arena_clear_needed = window.draw(cx);
@@ -1122,10 +1116,6 @@ impl Window {
                                 // drop the arena elements after present to reduce latency
                                 arena_clear_needed.clear();
                             });
-                        #[cfg(target_arch = "wasm32")]
-                        if let Err(ref e) = result {
-                            log::error!("request_frame: handle.update failed: {:?}", e);
-                        }
                         result.log_err();
                     })
                 } else if needs_present {
@@ -1321,6 +1311,7 @@ impl Window {
             active,
             hovered,
             needs_present,
+            scene_needs_render: true, // Start true so first frame renders
             last_input_timestamp,
             last_input_modality: InputModality::Mouse,
             refreshing: false,
@@ -2086,6 +2077,7 @@ impl Window {
         self.refreshing = false;
         self.invalidator.set_phase(DrawPhase::None);
         self.needs_present.set(true);
+        self.scene_needs_render = true;
 
         ArenaClearNeeded
     }
@@ -2114,24 +2106,17 @@ impl Window {
     }
 
     #[profiling::function]
-    fn present(&self) {
-        #[cfg(target_arch = "wasm32")]
-        {
-            let batch_count = self.rendered_frame.scene.batches().count();
-            log::debug!("present: scene has {} batches", batch_count);
+    fn present(&mut self) {
+        // Only send scene to platform renderer if it changed since last present
+        if self.scene_needs_render {
+            self.platform_window.draw(&self.rendered_frame.scene);
+            self.scene_needs_render = false;
         }
-        self.platform_window.draw(&self.rendered_frame.scene);
         self.needs_present.set(false);
         profiling::finish_frame!();
     }
 
     fn draw_roots(&mut self, cx: &mut App) {
-        #[cfg(target_arch = "wasm32")]
-        log::debug!(
-            "draw_roots: viewport_size={:?}, has_root={}",
-            self.viewport_size,
-            self.root.is_some()
-        );
 
         self.invalidator.set_phase(DrawPhase::Prepaint);
         self.tooltip_bounds.take();

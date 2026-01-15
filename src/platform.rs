@@ -61,7 +61,11 @@ use std::borrow::Cow;
 use std::hash::{Hash, Hasher};
 use std::io::Cursor;
 use std::ops;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
 use std::{
     fmt::{self, Debug},
     ops::Range,

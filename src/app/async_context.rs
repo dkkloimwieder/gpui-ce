@@ -93,22 +93,7 @@ impl AppContext for AsyncApp {
     where
         F: FnOnce(AnyView, &mut Window, &mut App) -> T,
     {
-        #[cfg(target_arch = "wasm32")]
-        log::debug!(
-            "AsyncApp::update_window: attempting upgrade, strong_count: {:?}, weak_count: {:?}",
-            self.app.strong_count(),
-            self.app.weak_count()
-        );
-        let app = self.app.upgrade();
-        #[cfg(target_arch = "wasm32")]
-        if app.is_none() {
-            log::error!(
-                "AsyncApp::update_window: app upgrade failed! strong_count: {:?}, weak_count: {:?}",
-                self.app.strong_count(),
-                self.app.weak_count()
-            );
-        }
-        let app = app.context("app was released")?;
+        let app = self.app.upgrade().context("app was released")?;
         let mut lock = app.try_borrow_mut()?;
         lock.update_window(window, f)
     }

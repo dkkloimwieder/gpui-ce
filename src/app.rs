@@ -1300,7 +1300,9 @@ impl App {
                         emitter,
                         event_type,
                         event,
-                    } => self.apply_emit_effect(emitter, event_type, event),
+                    } => {
+                        self.apply_emit_effect(emitter, event_type, event);
+                    }
 
                     Effect::RefreshWindows => {
                         self.apply_refresh_effect();
