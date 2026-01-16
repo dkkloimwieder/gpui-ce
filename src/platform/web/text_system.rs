@@ -6,7 +6,7 @@
 use crate::{
     Bounds, DevicePixels, Font, FontId, FontMetrics, FontRun, FontStyle, GlyphId, LineLayout,
     Pixels, PlatformTextSystem, Point, RenderGlyphParams, ShapedGlyph, ShapedRun, Size, point,
-    px, size,
+    px, size, util::measure,
 };
 use anyhow::Result;
 use collections::HashMap;
@@ -392,23 +392,37 @@ impl PlatformTextSystem for WebTextSystem {
                     .fill_text(&s, x, y)
                     .map_err(|e| anyhow::anyhow!("fill_text failed: {:?}", e))?;
 
-                // Get image data
-                let image_data = state
-                    .context
-                    .get_image_data(0.0, 0.0, width as f64, height as f64)
-                    .map_err(|e| anyhow::anyhow!("get_image_data failed: {:?}", e))?;
+                // Get image data - this is the expensive synchronous GPU readback
+                let image_data = measure("        glyph_get_image_data", || {
+                    state
+                        .context
+                        .get_image_data(0.0, 0.0, width as f64, height as f64)
+                        .map_err(|e| anyhow::anyhow!("get_image_data failed: {:?}", e))
+                })?;
 
                 let rgba_data = image_data.data();
 
-                // Convert RGBA to grayscale (alpha channel for monochrome glyphs)
-                // For text, we use the alpha channel since we draw white text
-                let mut grayscale = Vec::with_capacity((width * height) as usize);
-                for i in (0..rgba_data.len()).step_by(4) {
-                    // Use alpha channel for coverage
-                    grayscale.push(rgba_data[i + 3]);
+                if params.is_emoji {
+                    // For emojis, return BGRA data (4 bytes per pixel)
+                    // Canvas gives us RGBA, WebGPU texture expects BGRA
+                    let mut bgra = Vec::with_capacity(rgba_data.len());
+                    for i in (0..rgba_data.len()).step_by(4) {
+                        bgra.push(rgba_data[i + 2]); // B
+                        bgra.push(rgba_data[i + 1]); // G
+                        bgra.push(rgba_data[i]);     // R
+                        bgra.push(rgba_data[i + 3]); // A
+                    }
+                    return Ok((raster_bounds.size, bgra));
+                } else {
+                    // For regular text, convert RGBA to grayscale (alpha channel for monochrome glyphs)
+                    // We use the alpha channel since we draw white text
+                    let mut grayscale = Vec::with_capacity((width * height) as usize);
+                    for i in (0..rgba_data.len()).step_by(4) {
+                        // Use alpha channel for coverage
+                        grayscale.push(rgba_data[i + 3]);
+                    }
+                    return Ok((raster_bounds.size, grayscale));
                 }
-
-                return Ok((raster_bounds.size, grayscale));
             }
         }
 

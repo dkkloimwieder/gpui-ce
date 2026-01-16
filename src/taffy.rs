@@ -157,9 +157,7 @@ impl TaffyLayoutEngine {
         window: &mut Window,
         cx: &mut App,
     ) {
-        // Leaving this here until we have a better instrumentation approach.
-        // println!("Laying out {} children", self.count_all_children(id)?);
-        // println!("Max layout depth: {}", self.max_depth(0, id)?);
+        // Debug instrumentation removed for performance
 
         // Output the edges (branches) of the tree in Mermaid format for visualization.
         // println!("Edges:");
@@ -197,6 +195,11 @@ impl TaffyLayoutEngine {
             transform(available_space.height),
         );
 
+        // Timing instrumentation for measure callbacks
+        let measure_count = std::cell::Cell::new(0u32);
+        let measure_time_ns = std::cell::Cell::new(0u64);
+
+        let taffy_start = web_time::Instant::now();
         self.taffy
             .compute_layout_with_measure(
                 id.into(),
@@ -224,12 +227,29 @@ impl TaffyLayoutEngine {
                         untransform(available_space.height),
                     );
 
+                    // Time the measure callback
+                    let start = web_time::Instant::now();
                     let a: Size<Pixels> =
                         (node_context.measure)(known_dimensions, available_space, window, cx);
+                    let elapsed = start.elapsed().as_nanos() as u64;
+                    measure_count.set(measure_count.get() + 1);
+                    measure_time_ns.set(measure_time_ns.get() + elapsed);
+
                     size(a.width.0 * scale_factor, a.height.0 * scale_factor).into()
                 },
             )
             .expect(EXPECT_MESSAGE);
+        let taffy_elapsed_ms = taffy_start.elapsed().as_micros() as f64 / 1000.0;
+
+        // Log taffy timing (single line)
+        let measure_ms = measure_time_ns.get() as f64 / 1_000_000.0;
+        let taffy_algo_ms = taffy_elapsed_ms - measure_ms;
+        log::info!(
+            "        taffy: {:.1}ms algo + {:.1}ms measure ({} calls)",
+            taffy_algo_ms,
+            measure_ms,
+            measure_count.get()
+        );
     }
 
     pub fn layout_bounds(&mut self, id: LayoutId, scale_factor: f32) -> Bounds<Pixels> {

@@ -35,12 +35,20 @@ struct PendingUpload {
     data: Vec<u8>,
 }
 
+/// Cache statistics for debugging
+#[derive(Default)]
+struct CacheStats {
+    hits: u32,
+    misses: u32,
+}
+
 /// Internal state of the atlas
 struct WebGpuAtlasState {
     gpu: Rc<gpu::Context>,
     storage: WebGpuAtlasStorage,
     tiles_by_key: FxHashMap<AtlasKey, AtlasTile>,
     uploads: Vec<PendingUpload>,
+    stats: CacheStats,
 }
 
 /// Information about an atlas texture for binding in shaders
@@ -57,6 +65,7 @@ impl WebGpuAtlas {
             storage: WebGpuAtlasStorage::default(),
             tiles_by_key: Default::default(),
             uploads: Vec::new(),
+            stats: CacheStats::default(),
         }))
     }
 
@@ -121,9 +130,12 @@ impl PlatformAtlas for WebGpuAtlas {
         let mut state = self.0.borrow_mut();
 
         // Return cached tile if exists
-        if let Some(tile) = state.tiles_by_key.get(key) {
-            return Ok(Some(tile.clone()));
+        if let Some(tile) = state.tiles_by_key.get(key).cloned() {
+            state.stats.hits += 1;
+            return Ok(Some(tile));
         }
+
+        state.stats.misses += 1;
 
         // Build the tile data
         let Some((size, bytes)) = build()? else {
@@ -247,6 +259,21 @@ impl WebGpuAtlasState {
 
     /// Flush pending uploads to GPU
     fn flush_uploads(&mut self) {
+        // Log cache stats for this frame
+        let total = self.stats.hits + self.stats.misses;
+        if total > 0 {
+            let hit_rate = (self.stats.hits as f32 / total as f32) * 100.0;
+            log::info!(
+                "glyph cache: {} hits, {} misses ({:.1}% hit rate), {} total tiles",
+                self.stats.hits,
+                self.stats.misses,
+                hit_rate,
+                self.tiles_by_key.len()
+            );
+        }
+        // Reset stats for next frame
+        self.stats = CacheStats::default();
+
         for upload in self.uploads.drain(..) {
             let Some(texture) = self.storage.get(upload.id) else {
                 continue;

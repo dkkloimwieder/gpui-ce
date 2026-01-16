@@ -8,6 +8,7 @@
 //! wasm-bindgen-futures to properly initialize the renderer.
 
 use crate::{DevicePixels, PlatformAtlas, Scene, Size, size};
+use crate::util::measure;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -431,7 +432,7 @@ impl WebRenderer {
         }
 
         // Flush any pending atlas uploads
-        state.atlas.flush_uploads();
+        measure("      atlas_flush", || state.atlas.flush_uploads());
 
         // Acquire frame
         let frame = state.surface.acquire_frame();
@@ -524,7 +525,7 @@ impl WebRenderer {
         state.command_encoder.present(frame);
 
         // Submit
-        let sync_point = state.gpu.submit(&mut state.command_encoder);
+        let sync_point = measure("      gpu_submit", || state.gpu.submit(&mut state.command_encoder));
         state.last_sync_point = Some(sync_point);
     }
 

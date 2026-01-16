@@ -2022,7 +2022,7 @@ impl Window {
             self.rendered_frame.input_handlers.push(Some(input_handler));
         }
         if !cx.mode.skip_drawing() {
-            self.draw_roots(cx);
+            measure("  layout+paint", || self.draw_roots(cx));
         }
         self.dirty_views.clear();
         self.next_frame.window_active = self.active.get();
@@ -2034,8 +2034,8 @@ impl Window {
         }
 
         self.layout_engine.as_mut().unwrap().clear();
-        self.text_system().finish_frame();
-        self.next_frame.finish(&mut self.rendered_frame);
+        measure("  text_finish", || self.text_system().finish_frame());
+        measure("  frame_finish", || self.next_frame.finish(&mut self.rendered_frame));
 
         self.invalidator.set_phase(DrawPhase::Focus);
         let previous_focus_path = self.rendered_frame.focus_path();
@@ -2109,7 +2109,9 @@ impl Window {
     fn present(&mut self) {
         // Only send scene to platform renderer if it changed since last present
         if self.scene_needs_render {
-            self.platform_window.draw(&self.rendered_frame.scene);
+            measure("  gpu_render", || {
+                self.platform_window.draw(&self.rendered_frame.scene);
+            });
             self.scene_needs_render = false;
         }
         self.needs_present.set(false);
@@ -2140,8 +2142,20 @@ impl Window {
         };
 
         // Layout all root elements.
-        let mut root_element = self.root.as_ref().unwrap().clone().into_any();
-        root_element.prepaint_as_root(Point::default(), root_size.into(), self, cx);
+        let mut root_element = measure("    prepaint_root", || {
+            let mut root_element = measure("      clone_root", || {
+                self.root.as_ref().unwrap().clone().into_any()
+            });
+            measure("      layout_as_root", || {
+                root_element.layout_as_root(root_size.into(), self, cx);
+            });
+            measure("      prepaint_tree", || {
+                self.with_absolute_element_offset(Point::default(), |window| {
+                    root_element.prepaint(window, cx)
+                });
+            });
+            root_element
+        });
 
         #[cfg(any(feature = "inspector", debug_assertions))]
         let inspector_element = self.prepaint_inspector(_inspector_width, cx);
@@ -2173,7 +2187,7 @@ impl Window {
 
         // Now actually paint the elements.
         self.invalidator.set_phase(DrawPhase::Paint);
-        root_element.paint(self, cx);
+        measure("    paint_root", || root_element.paint(self, cx));
 
         #[cfg(any(feature = "inspector", debug_assertions))]
         self.paint_inspector(inspector_element, cx);
