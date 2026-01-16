@@ -77,6 +77,10 @@ pub(crate) struct WebWindowState {
     pub(crate) last_mouse_down_button: Option<i16>,
     /// Current click count
     pub(crate) click_count: usize,
+    /// Last known client coordinates (for recalculating offset on resize)
+    /// Stored as (clientX, clientY) from mouse events
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) last_client_position: Option<(f64, f64)>,
     /// Event listeners (must be kept alive)
     #[cfg(target_arch = "wasm32")]
     pub(crate) event_listeners: Option<super::event_listeners::EventListeners>,
@@ -168,6 +172,7 @@ impl WebWindow {
             last_mouse_down_time: None,
             last_mouse_down_button: None,
             click_count: 0,
+            last_client_position: None,
             event_listeners: None,
         })))
     }
@@ -253,6 +258,77 @@ impl WebWindow {
     }
 
     /// Called when browser window is resized
+    #[cfg(target_arch = "wasm32")]
+    pub fn handle_resize(&self, width: f32, height: f32) {
+        let (new_size, scale_factor, should_update_mouse) = {
+            let mut state = self.0.lock();
+            let new_size = size(px(width), px(height));
+            state.bounds.size = new_size;
+            let scale_factor = state.scale_factor;
+
+            // Recalculate mouse position from stored client coordinates
+            // This fixes hit test coordinates becoming stale after resize
+            let should_update_mouse = if let (Some(canvas), Some((client_x, client_y))) =
+                (&state.canvas, state.last_client_position)
+            {
+                let rect = canvas.get_bounding_client_rect();
+                let new_offset_x = client_x - rect.left();
+                let new_offset_y = client_y - rect.top();
+
+                // Only update if the mouse is still within canvas bounds
+                if new_offset_x >= 0.0
+                    && new_offset_y >= 0.0
+                    && new_offset_x <= rect.width()
+                    && new_offset_y <= rect.height()
+                {
+                    state.mouse_position = point(px(new_offset_x as f32), px(new_offset_y as f32));
+                    Some((new_offset_x as f32, new_offset_y as f32, state.modifiers))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            (new_size, scale_factor, should_update_mouse)
+        };
+
+        // Update renderer viewport size
+        {
+            let state = self.0.lock();
+            if let Some(ref renderer) = state.renderer {
+                let device_size = crate::Size {
+                    width: crate::DevicePixels((new_size.width.0 * scale_factor) as i32),
+                    height: crate::DevicePixels((new_size.height.0 * scale_factor) as i32),
+                };
+                renderer.update_drawable_size(device_size);
+            }
+        }
+
+        // Call resize callback
+        {
+            let mut state = self.0.lock();
+            if let Some(callback) = state.resize_callback.take() {
+                drop(state);
+                let mut callback = callback;
+                callback(new_size, scale_factor);
+                self.0.lock().resize_callback = Some(callback);
+            }
+        }
+
+        // Dispatch synthetic mouse move to update hit test
+        if let Some((x, y, modifiers)) = should_update_mouse {
+            let input = PlatformInput::MouseMove(crate::MouseMoveEvent {
+                position: point(px(x), px(y)),
+                pressed_button: None,
+                modifiers,
+            });
+            self.dispatch_input(input);
+        }
+    }
+
+    /// Called when browser window is resized (non-WASM fallback)
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn handle_resize(&self, width: f32, height: f32) {
         let mut state = self.0.lock();
         let new_size = size(px(width), px(height));
@@ -335,6 +411,8 @@ impl WebWindow {
         let click_count = state.click_count;
         state.mouse_position = point(px(event.offset_x() as f32), px(event.offset_y() as f32));
         state.modifiers = modifiers_from_mouse_event(event);
+        // Store client coordinates for recalculating offset on resize
+        state.last_client_position = Some((event.client_x() as f64, event.client_y() as f64));
 
         drop(state);
 
@@ -383,6 +461,8 @@ impl WebWindow {
             let mut state = self.0.lock();
             state.mouse_position = position;
             state.modifiers = modifiers_from_mouse_event(event);
+            // Store client coordinates for recalculating offset on resize
+            state.last_client_position = Some((event.client_x() as f64, event.client_y() as f64));
         }
 
         let input = PlatformInput::MouseMove(crate::MouseMoveEvent {
