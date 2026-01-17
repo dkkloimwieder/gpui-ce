@@ -42,19 +42,31 @@ pub fn setup_event_listeners(
     canvas: &web_sys::HtmlCanvasElement,
     window: Rc<WebWindow>,
 ) -> Result<EventListeners, JsValue> {
+    use wasm_bindgen::JsCast;
+
     // Make canvas focusable for keyboard events
     canvas.set_tab_index(0);
+
+    // Focus canvas immediately so keyboard events work
+    if let Some(html_element) = canvas.dyn_ref::<web_sys::HtmlElement>() {
+        let _ = html_element.focus();
+    }
 
     // Get performance object for timestamps
     let performance = web_sys::window()
         .and_then(|w| w.performance())
         .ok_or_else(|| JsValue::from_str("No performance API"))?;
 
-    // Mouse down
+    // Mouse down - also focus canvas to enable keyboard input
     let window_mousedown = window.clone();
     let perf_mousedown = performance.clone();
+    let canvas_for_focus = canvas.clone();
     let mousedown = Closure::<dyn FnMut(_)>::new(move |event: web_sys::MouseEvent| {
         event.prevent_default();
+        // Focus canvas on click to enable keyboard input
+        if let Some(html_element) = canvas_for_focus.dyn_ref::<web_sys::HtmlElement>() {
+            let _ = html_element.focus();
+        }
         let now = perf_mousedown.now();
         window_mousedown.handle_mouse_down(&event, now);
     });
@@ -110,7 +122,11 @@ pub fn setup_event_listeners(
         // Don't prevent default for all keys - allow browser shortcuts
         // Only prevent for keys we're handling
         let key = event.key();
-        if !should_allow_browser_default(&key) {
+        let ctrl = event.ctrl_key() || event.meta_key();
+        // Always prevent Ctrl+S (save page) and other app shortcuts
+        if ctrl && (key == "s" || key == "S") {
+            event.prevent_default();
+        } else if !should_allow_browser_default(&key) {
             event.prevent_default();
         }
         window_keydown.handle_key_down(&event);
@@ -196,6 +212,9 @@ pub fn start_animation_loop(window: Rc<WebWindow>) -> Result<(), JsValue> {
 
     // Create the closure that will call itself recursively
     let closure = Closure::new(move || {
+        // Poll the dispatcher to run any pending async tasks (timers, tooltips, etc.)
+        super::dispatcher::poll_global_dispatcher();
+
         // Request the frame from GPUI
         window.request_frame();
 

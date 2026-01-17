@@ -488,6 +488,8 @@ impl WebWindow {
     pub fn handle_key_down(&self, event: &web_sys::KeyboardEvent) {
         use super::events::{is_modifier_key, key_down_from_browser, modifiers_changed_from_keyboard, modifiers_from_keyboard_event};
 
+        log::info!("handle_key_down: key={}", event.key());
+
         // Update modifiers
         {
             let mut state = self.0.lock();

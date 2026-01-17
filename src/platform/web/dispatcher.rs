@@ -8,10 +8,34 @@ use crate::{
 };
 use parking_lot::Mutex;
 use std::{
+    cell::RefCell,
     collections::VecDeque,
     sync::Arc,
     time::Duration,
 };
+
+// Thread-local storage for the global dispatcher reference
+// This allows the animation loop to poll pending tasks
+thread_local! {
+    static GLOBAL_DISPATCHER: RefCell<Option<Arc<WebDispatcher>>> = const { RefCell::new(None) };
+}
+
+/// Set the global dispatcher reference (called when platform is created)
+pub fn set_global_dispatcher(dispatcher: Arc<WebDispatcher>) {
+    GLOBAL_DISPATCHER.with(|d| {
+        *d.borrow_mut() = Some(dispatcher);
+    });
+}
+
+/// Poll the global dispatcher to run pending tasks
+/// Called from the requestAnimationFrame loop
+pub fn poll_global_dispatcher() {
+    GLOBAL_DISPATCHER.with(|d| {
+        if let Some(ref dispatcher) = *d.borrow() {
+            dispatcher.poll();
+        }
+    });
+}
 
 /// Web dispatcher - schedules tasks using browser APIs
 pub struct WebDispatcher {

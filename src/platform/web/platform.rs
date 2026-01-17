@@ -8,7 +8,7 @@ use super::text_system::WebTextSystem;
 use super::window::WebWindow;
 use crate::{
     AnyWindowHandle, BackgroundExecutor, ClipboardItem, CursorStyle, ForegroundExecutor, Keymap,
-    Platform, PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper,
+    Platform, PlatformDispatcher, PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper,
     PlatformTextSystem, PlatformWindow, Task, WindowAppearance, WindowParams,
     DummyKeyboardMapper, Bounds, Pixels, DisplayId, point, px,
 };
@@ -45,6 +45,10 @@ pub fn get_canvas_element(canvas_id: &str) -> Result<web_sys::HtmlCanvasElement>
     let canvas = element.dyn_into::<web_sys::HtmlCanvasElement>()
         .map_err(|_| anyhow::anyhow!("Element '{}' is not a canvas", canvas_id))?;
 
+    // Make canvas focusable for keyboard events
+    canvas.set_attribute("tabindex", "0")
+        .map_err(|_| anyhow::anyhow!("Failed to set tabindex on canvas"))?;
+
     Ok(canvas)
 }
 
@@ -55,7 +59,7 @@ pub(crate) struct WebPlatform {
     text_system: Arc<dyn PlatformTextSystem>,
     clipboard: Mutex<Option<ClipboardItem>>,
     /// Dispatcher for task scheduling
-    dispatcher: Arc<WebDispatcher>,
+    dispatcher: Arc<dyn PlatformDispatcher>,
     /// Active window (single window for now)
     active_window: RefCell<Option<WebWindow>>,
     /// Primary display
@@ -71,8 +75,12 @@ pub(crate) struct WebPlatform {
 
 impl WebPlatform {
     /// Create a new web platform with the given executors
+    /// Note: The global dispatcher should be set via set_global_dispatcher() BEFORE calling this,
+    /// using the same dispatcher that was used to create the executors.
     pub fn new(background_executor: BackgroundExecutor, foreground_executor: ForegroundExecutor) -> Rc<Self> {
-        let dispatcher = Arc::new(WebDispatcher::new());
+        // Get dispatcher from foreground executor (it's the same one used by both)
+        let dispatcher = foreground_executor.dispatcher.clone();
+
         Rc::new(Self {
             background_executor,
             foreground_executor,
@@ -461,6 +469,10 @@ pub(crate) fn current_platform(_headless: bool) -> Rc<dyn Platform> {
 
         // Create the dispatcher
         let dispatcher = Arc::new(WebDispatcher::new());
+
+        // Set the global dispatcher so the animation loop can poll pending tasks
+        // IMPORTANT: This must be the same dispatcher used by the executors!
+        super::dispatcher::set_global_dispatcher(dispatcher.clone());
 
         // Create executors from the dispatcher
         let background_executor = BackgroundExecutor::new(dispatcher.clone());
