@@ -487,8 +487,10 @@ impl PlatformTextSystem for WebTextSystem {
                     let char_str = ch.to_string();
 
                     // Detect emoji (simple heuristic)
-                    let is_emoji = ch as u32 > 0x1F000
-                        || (ch as u32 >= 0x2600 && ch as u32 <= 0x27BF)
+                    // Only treat characters in actual emoji blocks as emoji.
+                    // Miscellaneous Symbols (0x2600-0x27BF) like ★☆♠♣ should be
+                    // rendered as tintable monochrome glyphs, not as emoji.
+                    let is_emoji = ch as u32 >= 0x1F000
                         || (ch as u32 >= 0xFE00 && ch as u32 <= 0xFE0F);
 
                     glyphs.push(ShapedGlyph {
