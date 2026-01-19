@@ -20,7 +20,7 @@ use blade_graphics as gpu;
 use std::{mem, ptr};
 
 #[cfg(target_arch = "wasm32")]
-use crate::scene::{Quad, MonochromeSprite, PolychromeSprite};
+use crate::scene::{Quad, MonochromeSprite, PolychromeSprite, Shadow};
 
 #[cfg(target_arch = "wasm32")]
 use super::web_atlas::WebGpuAtlas;
@@ -53,6 +53,14 @@ struct ShaderPolySpritesData {
     b_poly_sprites: gpu::BufferPiece,
 }
 
+/// Shader data layout for shadow rendering
+#[cfg(target_arch = "wasm32")]
+#[derive(blade_macros::ShaderData)]
+struct ShaderShadowsData {
+    globals: GlobalParams,
+    b_shadows: gpu::BufferPiece,
+}
+
 /// Maximum number of quads per batch
 #[cfg(target_arch = "wasm32")]
 const MAX_QUADS_PER_BATCH: usize = 4096;
@@ -60,6 +68,10 @@ const MAX_QUADS_PER_BATCH: usize = 4096;
 /// Maximum number of sprites per batch
 #[cfg(target_arch = "wasm32")]
 const MAX_SPRITES_PER_BATCH: usize = 4096;
+
+/// Maximum number of shadows per batch
+#[cfg(target_arch = "wasm32")]
+const MAX_SHADOWS_PER_BATCH: usize = 4096;
 
 /// Global parameters passed to all shaders.
 ///
@@ -143,6 +155,10 @@ pub struct WebRendererState {
     pub poly_sprite_pipeline: gpu::RenderPipeline,
     /// Buffer for polychrome sprite instance data
     pub poly_sprite_buffer: gpu::Buffer,
+    /// Shadow render pipeline
+    pub shadow_pipeline: gpu::RenderPipeline,
+    /// Buffer for shadow instance data
+    pub shadow_buffer: gpu::Buffer,
     /// Sampler for atlas textures
     pub atlas_sampler: gpu::Sampler,
     /// Texture atlas for sprites/glyphs (Arc for sharing with window)
@@ -357,6 +373,34 @@ impl WebRenderer {
             memory: gpu::Memory::Shared,
         });
 
+        // Create shadow render pipeline
+        let shadow_layout = <ShaderShadowsData as gpu::ShaderData>::layout();
+        let shadow_pipeline = gpu.create_render_pipeline(gpu::RenderPipelineDesc {
+            name: "shadows",
+            data_layouts: &[&shadow_layout],
+            vertex: shader.at("vs_shadow"),
+            vertex_fetches: &[],
+            fragment: Some(shader.at("fs_shadow")),
+            primitive: gpu::PrimitiveState {
+                topology: gpu::PrimitiveTopology::TriangleStrip,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            color_targets: &[gpu::ColorTargetState {
+                format: surface.info().format,
+                blend: Some(gpu::BlendState::ALPHA_BLENDING),
+                write_mask: gpu::ColorWrites::ALL,
+            }],
+            multisample_state: gpu::MultisampleState::default(),
+        });
+
+        // Create shadow instance buffer
+        let shadow_buffer = gpu.create_buffer(gpu::BufferDesc {
+            name: "shadows",
+            size: (mem::size_of::<Shadow>() * MAX_SHADOWS_PER_BATCH) as u64,
+            memory: gpu::Memory::Shared,
+        });
+
         // Create texture atlas for sprites and glyphs (Arc for sharing with window)
         let atlas = Arc::new(WebGpuAtlas::new(&gpu));
 
@@ -375,6 +419,8 @@ impl WebRenderer {
             mono_sprite_buffer,
             poly_sprite_pipeline,
             poly_sprite_buffer,
+            shadow_pipeline,
+            shadow_buffer,
             atlas_sampler,
             atlas,
         });
@@ -464,6 +510,7 @@ impl WebRenderer {
             let mut quad_buffer_offset: u64 = 0;
             let mut mono_sprite_buffer_offset: u64 = 0;
             let mut poly_sprite_buffer_offset: u64 = 0;
+            let mut shadow_buffer_offset: u64 = 0;
 
             for batch in scene.batches() {
                 match batch {
@@ -478,6 +525,18 @@ impl WebRenderer {
                             &state.gpu,
                         );
                         quad_buffer_offset = new_offset;
+                    }
+                    PrimitiveBatch::Shadows(shadows) => {
+                        let new_offset = Self::draw_shadows_internal(
+                            &mut pass,
+                            shadows,
+                            shadow_buffer_offset,
+                            &state.globals,
+                            state.shadow_buffer,
+                            &state.shadow_pipeline,
+                            &state.gpu,
+                        );
+                        shadow_buffer_offset = new_offset;
                     }
                     PrimitiveBatch::MonochromeSprites { texture_id, sprites } => {
                         if let Some(tex_info) = state.atlas.get_texture_info(texture_id) {
@@ -515,7 +574,7 @@ impl WebRenderer {
                             log::warn!("No texture info for polychrome sprite batch texture {:?}", texture_id);
                         }
                     }
-                    // TODO: Other primitive types (shadows, paths, underlines, surfaces)
+                    // TODO: Other primitive types (paths, underlines, surfaces)
                     _ => {}
                 }
             }
@@ -587,6 +646,68 @@ impl WebRenderer {
         );
 
         // Draw instanced quads (4 vertices per quad, N instances)
+        encoder.draw(0, 4, 0, count as u32);
+
+        // Return the new offset for the next batch, aligned to storage buffer alignment
+        let next_offset = buffer_offset + data_size;
+        (next_offset + Self::STORAGE_BUFFER_ALIGNMENT - 1) & !(Self::STORAGE_BUFFER_ALIGNMENT - 1)
+    }
+
+    /// Internal helper to draw shadows during a render pass
+    /// Returns the new buffer offset for the next batch
+    #[cfg(target_arch = "wasm32")]
+    fn draw_shadows_internal(
+        pass: &mut gpu::RenderCommandEncoder,
+        shadows: &[Shadow],
+        buffer_offset: u64,
+        globals: &GlobalParams,
+        shadow_buffer: gpu::Buffer,
+        pipeline: &gpu::RenderPipeline,
+        gpu: &gpu::Context,
+    ) -> u64 {
+        if shadows.is_empty() {
+            return buffer_offset;
+        }
+
+        let count = shadows.len().min(MAX_SHADOWS_PER_BATCH);
+        let shadow_size = mem::size_of::<Shadow>() as u64;
+        let data_size = count as u64 * shadow_size;
+
+        // Check if we have room in the buffer
+        let max_offset = (MAX_SHADOWS_PER_BATCH as u64) * shadow_size;
+        if buffer_offset + data_size > max_offset {
+            log::warn!("Shadow buffer overflow! offset={}, size={}, max={}",
+                buffer_offset, data_size, max_offset);
+            return buffer_offset;
+        }
+
+        log::debug!(
+            "draw_shadows_internal: drawing {} shadows at offset {}, viewport={:?}",
+            count, buffer_offset, globals.viewport_size
+        );
+
+        // Upload shadow data to buffer at the specified offset
+        unsafe {
+            let dst = (shadow_buffer.data() as *mut u8).add(buffer_offset as usize) as *mut Shadow;
+            ptr::copy_nonoverlapping(shadows.as_ptr(), dst, count);
+        }
+        // Mark the specific range as dirty for efficient sync
+        gpu.sync_buffer_range(shadow_buffer, buffer_offset, data_size);
+
+        // Bind pipeline and data with the correct buffer offset
+        let mut encoder = pass.with(pipeline);
+        encoder.bind(
+            0,
+            &ShaderShadowsData {
+                globals: *globals,
+                b_shadows: gpu::BufferPiece {
+                    buffer: shadow_buffer,
+                    offset: buffer_offset,
+                },
+            },
+        );
+
+        // Draw instanced shadows (4 vertices per shadow, N instances)
         encoder.draw(0, 4, 0, count as u32);
 
         // Return the new offset for the next batch, aligned to storage buffer alignment

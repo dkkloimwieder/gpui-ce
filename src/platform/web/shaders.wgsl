@@ -399,3 +399,98 @@ fn fs_poly_sprite(input: PolySpriteVarying) -> @location(0) vec4<f32> {
 
     return blend_color(color, sprite.opacity);
 }
+
+// === Shadow Shader === //
+
+const M_PI_F: f32 = 3.1415926;
+
+struct Shadow {
+    order: u32,
+    blur_radius: f32,
+    bounds: Bounds,
+    corner_radii: Corners,
+    content_mask: Bounds,
+    color: Hsla,
+}
+
+var<storage, read> b_shadows: array<Shadow>;
+
+struct ShadowVarying {
+    @builtin(position) position: vec4<f32>,
+    @location(0) @interpolate(flat) color: vec4<f32>,
+    @location(1) @interpolate(flat) shadow_id: u32,
+    @location(2) clip_distances: vec4<f32>,
+}
+
+// A standard gaussian function, used for weighting samples
+fn gaussian(x: f32, sigma: f32) -> f32 {
+    return exp(-(x * x) / (2.0 * sigma * sigma)) / (sqrt(2.0 * M_PI_F) * sigma);
+}
+
+// This approximates the error function, needed for the gaussian integral
+fn erf(v: vec2<f32>) -> vec2<f32> {
+    let s = sign(v);
+    let a = abs(v);
+    let r1 = 1.0 + (0.278393 + (0.230389 + (0.000972 + 0.078108 * a) * a) * a) * a;
+    let r2 = r1 * r1;
+    return s - s / (r2 * r2);
+}
+
+fn blur_along_x(x: f32, y: f32, sigma: f32, corner: f32, half_size: vec2<f32>) -> f32 {
+    let delta = min(half_size.y - corner - abs(y), 0.0);
+    let curved = half_size.x - corner + sqrt(max(0.0, corner * corner - delta * delta));
+    let integral = 0.5 + 0.5 * erf((x + vec2<f32>(-curved, curved)) * (sqrt(0.5) / sigma));
+    return integral.y - integral.x;
+}
+
+@vertex
+fn vs_shadow(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) instance_id: u32) -> ShadowVarying {
+    let unit_vertex = vec2<f32>(f32(vertex_id & 1u), 0.5 * f32(vertex_id & 2u));
+    var shadow = b_shadows[instance_id];
+
+    let margin = 3.0 * shadow.blur_radius;
+    // Expand bounds to cover blur extent
+    shadow.bounds.origin -= vec2<f32>(margin);
+    shadow.bounds.size += 2.0 * vec2<f32>(margin);
+
+    var out = ShadowVarying();
+    out.position = to_device_position(unit_vertex, shadow.bounds);
+    out.color = hsla_to_rgba(shadow.color);
+    out.shadow_id = instance_id;
+    out.clip_distances = distance_from_clip_rect(unit_vertex, shadow.bounds, shadow.content_mask);
+    return out;
+}
+
+@fragment
+fn fs_shadow(input: ShadowVarying) -> @location(0) vec4<f32> {
+    // Alpha clip first
+    if (any(input.clip_distances < vec4<f32>(0.0))) {
+        return vec4<f32>(0.0);
+    }
+
+    let shadow = b_shadows[input.shadow_id];
+    let half_size = shadow.bounds.size / 2.0;
+    let center = shadow.bounds.origin + half_size;
+    let center_to_point = input.position.xy - center;
+
+    let corner_radius = pick_corner_radius(center_to_point, shadow.corner_radii);
+
+    // The signal is only non-zero in a limited range, so don't waste samples
+    let low = center_to_point.y - half_size.y;
+    let high = center_to_point.y + half_size.y;
+    let start = clamp(-3.0 * shadow.blur_radius, low, high);
+    let end = clamp(3.0 * shadow.blur_radius, low, high);
+
+    // Accumulate samples (we can get away with surprisingly few samples)
+    let step = (end - start) / 4.0;
+    var y = start + step * 0.5;
+    var alpha = 0.0;
+    for (var i = 0; i < 4; i += 1) {
+        let blur = blur_along_x(center_to_point.x, center_to_point.y - y,
+            shadow.blur_radius, corner_radius, half_size);
+        alpha += blur * gaussian(y, shadow.blur_radius) * step;
+        y += step;
+    }
+
+    return blend_color(input.color, alpha);
+}
