@@ -20,7 +20,7 @@ use blade_graphics as gpu;
 use std::{mem, ptr};
 
 #[cfg(target_arch = "wasm32")]
-use crate::scene::{Quad, MonochromeSprite, PolychromeSprite, Shadow};
+use crate::scene::{Quad, MonochromeSprite, PolychromeSprite, Shadow, Path};
 
 #[cfg(target_arch = "wasm32")]
 use super::web_atlas::WebGpuAtlas;
@@ -579,6 +579,7 @@ impl WebRenderer {
             let mut mono_sprite_buffer_offset: u64 = 0;
             let mut poly_sprite_buffer_offset: u64 = 0;
             let mut shadow_buffer_offset: u64 = 0;
+            let mut path_buffer_offset: u64 = 0;
 
             for batch in scene.batches() {
                 match batch {
@@ -642,7 +643,19 @@ impl WebRenderer {
                             log::warn!("No texture info for polychrome sprite batch texture {:?}", texture_id);
                         }
                     }
-                    // TODO: Other primitive types (paths, underlines, surfaces)
+                    PrimitiveBatch::Paths(paths) => {
+                        let new_offset = Self::draw_paths_internal(
+                            &mut pass,
+                            paths,
+                            path_buffer_offset,
+                            &state.globals,
+                            state.path_buffer,
+                            &state.path_pipeline,
+                            &state.gpu,
+                        );
+                        path_buffer_offset = new_offset;
+                    }
+                    // TODO: Other primitive types (underlines, surfaces)
                     _ => {}
                 }
             }
@@ -777,6 +790,105 @@ impl WebRenderer {
 
         // Draw instanced shadows (4 vertices per shadow, N instances)
         encoder.draw(0, 4, 0, count as u32);
+
+        // Return the new offset for the next batch, aligned to storage buffer alignment
+        let next_offset = buffer_offset + data_size;
+        (next_offset + Self::STORAGE_BUFFER_ALIGNMENT - 1) & !(Self::STORAGE_BUFFER_ALIGNMENT - 1)
+    }
+
+    /// Internal helper to draw paths during a render pass
+    /// Returns the new buffer offset for the next batch
+    #[cfg(target_arch = "wasm32")]
+    fn draw_paths_internal(
+        pass: &mut gpu::RenderCommandEncoder,
+        paths: &[Path<crate::ScaledPixels>],
+        buffer_offset: u64,
+        globals: &GlobalParams,
+        path_buffer: gpu::Buffer,
+        pipeline: &gpu::RenderPipeline,
+        gpu: &gpu::Context,
+    ) -> u64 {
+        if paths.is_empty() {
+            return buffer_offset;
+        }
+
+        // Count total vertices across all paths
+        let total_vertices: usize = paths.iter().map(|p| p.vertices.len()).sum();
+        if total_vertices == 0 {
+            return buffer_offset;
+        }
+
+        let vertex_size = mem::size_of::<GpuPathVertex>() as u64;
+        let count = total_vertices.min(MAX_PATH_VERTICES_PER_BATCH);
+        let data_size = count as u64 * vertex_size;
+
+        // Check if we have room in the buffer
+        let max_offset = (MAX_PATH_VERTICES_PER_BATCH as u64) * vertex_size;
+        if buffer_offset + data_size > max_offset {
+            log::warn!("Path buffer overflow! offset={}, size={}, max={}",
+                buffer_offset, data_size, max_offset);
+            return buffer_offset;
+        }
+
+        log::debug!(
+            "draw_paths_internal: drawing {} paths ({} vertices) at offset {}",
+            paths.len(), count, buffer_offset
+        );
+
+        // Flatten path vertices into GPU buffer
+        unsafe {
+            let dst = (path_buffer.data() as *mut u8).add(buffer_offset as usize) as *mut GpuPathVertex;
+            let mut vertex_index = 0;
+
+            for path in paths {
+                // Get the path's color from the Background struct
+                // Background always has a solid color field
+                let color = path.color.solid;
+
+                for vertex in &path.vertices {
+                    if vertex_index >= count {
+                        break;
+                    }
+
+                    let gpu_vertex = GpuPathVertex {
+                        xy_position_x: vertex.xy_position.x.0,
+                        xy_position_y: vertex.xy_position.y.0,
+                        st_position_x: vertex.st_position.x,
+                        st_position_y: vertex.st_position.y,
+                        content_mask_origin_x: vertex.content_mask.bounds.origin.x.0,
+                        content_mask_origin_y: vertex.content_mask.bounds.origin.y.0,
+                        content_mask_size_width: vertex.content_mask.bounds.size.width.0,
+                        content_mask_size_height: vertex.content_mask.bounds.size.height.0,
+                        color_h: color.h,
+                        color_s: color.s,
+                        color_l: color.l,
+                        color_a: color.a,
+                    };
+
+                    ptr::write(dst.add(vertex_index), gpu_vertex);
+                    vertex_index += 1;
+                }
+            }
+        }
+
+        // Mark the specific range as dirty for efficient sync
+        gpu.sync_buffer_range(path_buffer, buffer_offset, data_size);
+
+        // Bind pipeline and data
+        let mut encoder = pass.with(pipeline);
+        encoder.bind(
+            0,
+            &ShaderPathsData {
+                globals: *globals,
+                b_path_vertices: gpu::BufferPiece {
+                    buffer: path_buffer,
+                    offset: buffer_offset,
+                },
+            },
+        );
+
+        // Draw triangles (3 vertices per triangle, no instancing)
+        encoder.draw(0, count as u32, 0, 1);
 
         // Return the new offset for the next batch, aligned to storage buffer alignment
         let next_offset = buffer_offset + data_size;
