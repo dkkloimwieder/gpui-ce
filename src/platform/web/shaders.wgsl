@@ -12,8 +12,10 @@ struct GlobalParams {
 var<uniform> globals: GlobalParams;
 
 struct Bounds {
-    origin: vec2<f32>,
-    size: vec2<f32>,
+    origin_x: f32,
+    origin_y: f32,
+    size_width: f32,
+    size_height: f32,
 }
 
 struct Corners {
@@ -54,15 +56,21 @@ struct Background {
 // === Helper Functions === //
 
 fn to_device_position(unit_vertex: vec2<f32>, bounds: Bounds) -> vec4<f32> {
-    let position = unit_vertex * vec2<f32>(bounds.size) + bounds.origin;
+    let origin = vec2<f32>(bounds.origin_x, bounds.origin_y);
+    let size = vec2<f32>(bounds.size_width, bounds.size_height);
+    let position = unit_vertex * size + origin;
     let device_position = position / globals.viewport_size * vec2<f32>(2.0, -2.0) + vec2<f32>(-1.0, 1.0);
     return vec4<f32>(device_position, 0.0, 1.0);
 }
 
 fn distance_from_clip_rect(unit_vertex: vec2<f32>, bounds: Bounds, clip_bounds: Bounds) -> vec4<f32> {
-    let position = unit_vertex * vec2<f32>(bounds.size) + bounds.origin;
-    let tl = position - clip_bounds.origin;
-    let br = clip_bounds.origin + clip_bounds.size - position;
+    let origin = vec2<f32>(bounds.origin_x, bounds.origin_y);
+    let size = vec2<f32>(bounds.size_width, bounds.size_height);
+    let clip_origin = vec2<f32>(clip_bounds.origin_x, clip_bounds.origin_y);
+    let clip_size = vec2<f32>(clip_bounds.size_width, clip_bounds.size_height);
+    let position = unit_vertex * size + origin;
+    let tl = position - clip_origin;
+    let br = clip_origin + clip_size - position;
     return vec4<f32>(tl.x, br.x, tl.y, br.y);
 }
 
@@ -203,9 +211,9 @@ fn fs_quad(input: QuadVarying) -> @location(0) vec4<f32> {
         return blend_color(background_color, 1.0);
     }
 
-    let size = quad.bounds.size;
+    let size = vec2<f32>(quad.bounds.size_width, quad.bounds.size_height);
     let half_size = size / 2.0;
-    let point = input.position.xy - quad.bounds.origin;
+    let point = input.position.xy - vec2<f32>(quad.bounds.origin_x, quad.bounds.origin_y);
     let center_to_point = point - half_size;
 
     let antialias_threshold = 0.5;
@@ -448,10 +456,12 @@ fn vs_shadow(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) ins
     let unit_vertex = vec2<f32>(f32(vertex_id & 1u), 0.5 * f32(vertex_id & 2u));
     var shadow = b_shadows[instance_id];
 
+    // Expand bounds by blur margin
     let margin = 3.0 * shadow.blur_radius;
-    // Expand bounds to cover blur extent
-    shadow.bounds.origin -= vec2<f32>(margin);
-    shadow.bounds.size += 2.0 * vec2<f32>(margin);
+    shadow.bounds.origin_x -= margin;
+    shadow.bounds.origin_y -= margin;
+    shadow.bounds.size_width += 2.0 * margin;
+    shadow.bounds.size_height += 2.0 * margin;
 
     var out = ShadowVarying();
     out.position = to_device_position(unit_vertex, shadow.bounds);
@@ -469,8 +479,8 @@ fn fs_shadow(input: ShadowVarying) -> @location(0) vec4<f32> {
     }
 
     let shadow = b_shadows[input.shadow_id];
-    let half_size = shadow.bounds.size / 2.0;
-    let center = shadow.bounds.origin + half_size;
+    let half_size = vec2<f32>(shadow.bounds.size_width, shadow.bounds.size_height) / 2.0;
+    let center = vec2<f32>(shadow.bounds.origin_x, shadow.bounds.origin_y) + half_size;
     let center_to_point = input.position.xy - center;
 
     let corner_radius = pick_corner_radius(center_to_point, shadow.corner_radii);
@@ -492,5 +502,6 @@ fn fs_shadow(input: ShadowVarying) -> @location(0) vec4<f32> {
         y += step;
     }
 
-    return blend_color(input.color, alpha);
+    // Use blur alpha directly; color's alpha controls shadow darkness, not coverage
+    return vec4<f32>(input.color.rgb * input.color.a, alpha);
 }
