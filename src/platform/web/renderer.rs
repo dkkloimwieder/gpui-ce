@@ -61,6 +61,36 @@ struct ShaderShadowsData {
     b_shadows: gpu::BufferPiece,
 }
 
+/// Shader data layout for path rendering
+#[cfg(target_arch = "wasm32")]
+#[derive(blade_macros::ShaderData)]
+struct ShaderPathsData {
+    globals: GlobalParams,
+    b_path_vertices: gpu::BufferPiece,
+}
+
+/// GPU-side path vertex structure.
+/// Must match PathVertex in shaders.wgsl exactly.
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
+struct GpuPathVertex {
+    xy_position_x: f32,
+    xy_position_y: f32,
+    st_position_x: f32,
+    st_position_y: f32,
+    // content_mask as Bounds (4 f32s)
+    content_mask_origin_x: f32,
+    content_mask_origin_y: f32,
+    content_mask_size_width: f32,
+    content_mask_size_height: f32,
+    // color as Hsla (4 f32s)
+    color_h: f32,
+    color_s: f32,
+    color_l: f32,
+    color_a: f32,
+}
+
 /// Maximum number of quads per batch
 #[cfg(target_arch = "wasm32")]
 const MAX_QUADS_PER_BATCH: usize = 4096;
@@ -72,6 +102,10 @@ const MAX_SPRITES_PER_BATCH: usize = 4096;
 /// Maximum number of shadows per batch
 #[cfg(target_arch = "wasm32")]
 const MAX_SHADOWS_PER_BATCH: usize = 4096;
+
+/// Maximum number of path vertices per batch
+#[cfg(target_arch = "wasm32")]
+const MAX_PATH_VERTICES_PER_BATCH: usize = 65536;
 
 /// Global parameters passed to all shaders.
 ///
@@ -159,6 +193,10 @@ pub struct WebRendererState {
     pub shadow_pipeline: gpu::RenderPipeline,
     /// Buffer for shadow instance data
     pub shadow_buffer: gpu::Buffer,
+    /// Path render pipeline
+    pub path_pipeline: gpu::RenderPipeline,
+    /// Buffer for path vertex data
+    pub path_buffer: gpu::Buffer,
     /// Sampler for atlas textures
     pub atlas_sampler: gpu::Sampler,
     /// Texture atlas for sprites/glyphs (Arc for sharing with window)
@@ -401,6 +439,34 @@ impl WebRenderer {
             memory: gpu::Memory::Shared,
         });
 
+        // Create path render pipeline
+        let path_layout = <ShaderPathsData as gpu::ShaderData>::layout();
+        let path_pipeline = gpu.create_render_pipeline(gpu::RenderPipelineDesc {
+            name: "paths",
+            data_layouts: &[&path_layout],
+            vertex: shader.at("vs_path"),
+            vertex_fetches: &[],
+            fragment: Some(shader.at("fs_path")),
+            primitive: gpu::PrimitiveState {
+                topology: gpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            color_targets: &[gpu::ColorTargetState {
+                format: surface.info().format,
+                blend: Some(gpu::BlendState::ALPHA_BLENDING),
+                write_mask: gpu::ColorWrites::ALL,
+            }],
+            multisample_state: gpu::MultisampleState::default(),
+        });
+
+        // Create path vertex buffer
+        let path_buffer = gpu.create_buffer(gpu::BufferDesc {
+            name: "path_vertices",
+            size: (mem::size_of::<GpuPathVertex>() * MAX_PATH_VERTICES_PER_BATCH) as u64,
+            memory: gpu::Memory::Shared,
+        });
+
         // Create texture atlas for sprites and glyphs (Arc for sharing with window)
         let atlas = Arc::new(WebGpuAtlas::new(&gpu));
 
@@ -421,6 +487,8 @@ impl WebRenderer {
             poly_sprite_buffer,
             shadow_pipeline,
             shadow_buffer,
+            path_pipeline,
+            path_buffer,
             atlas_sampler,
             atlas,
         });
