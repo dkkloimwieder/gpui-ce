@@ -72,11 +72,16 @@ impl From<Point<Pixels>> for Point2D<f32, Pixels> {
     }
 }
 
+/// Default tessellation tolerance for path rendering.
+/// Smaller values = smoother curves but more triangles.
+/// 0.1 is lyon's default but appears grainy on high-DPI displays.
+const DEFAULT_TOLERANCE: f32 = 0.01;
+
 impl Default for PathBuilder {
     fn default() -> Self {
         Self {
             raw: lyon::path::Path::builder().with_svg(),
-            style: PathStyle::Fill(FillOptions::default()),
+            style: PathStyle::Fill(FillOptions::default().with_tolerance(DEFAULT_TOLERANCE)),
             transform: None,
             dash_array: None,
         }
@@ -87,7 +92,11 @@ impl PathBuilder {
     /// Creates a new [`PathBuilder`] to build a Stroke path.
     pub fn stroke(width: Pixels) -> Self {
         Self {
-            style: PathStyle::Stroke(StrokeOptions::default().with_line_width(width.0)),
+            style: PathStyle::Stroke(
+                StrokeOptions::default()
+                    .with_line_width(width.0)
+                    .with_tolerance(DEFAULT_TOLERANCE)
+            ),
             ..Self::default()
         }
     }

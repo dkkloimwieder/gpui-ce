@@ -159,6 +159,9 @@ impl Default for WebSurfaceConfig {
     }
 }
 
+/// MSAA sample count for antialiasing (4x MSAA)
+const MSAA_SAMPLE_COUNT: u32 = 4;
+
 /// Web renderer state - not Send/Sync since WASM is single-threaded
 pub struct WebRendererState {
     /// GPU context (shared via Rc for atlas)
@@ -173,6 +176,10 @@ pub struct WebRendererState {
     pub last_sync_point: Option<gpu::SyncPoint>,
     /// Current drawable size
     pub drawable_size: Size<DevicePixels>,
+    /// MSAA render target texture
+    pub msaa_texture: gpu::Texture,
+    /// MSAA render target view
+    pub msaa_view: gpu::TextureView,
     /// Global parameters for shaders
     pub globals: GlobalParams,
     /// GPU buffer for global parameters
@@ -335,7 +342,10 @@ impl WebRenderer {
                 blend: Some(gpu::BlendState::ALPHA_BLENDING),
                 write_mask: gpu::ColorWrites::ALL,
             }],
-            multisample_state: gpu::MultisampleState::default(),
+            multisample_state: gpu::MultisampleState {
+                sample_count: MSAA_SAMPLE_COUNT,
+                ..Default::default()
+            },
         });
 
         // Create quad instance buffer
@@ -373,7 +383,10 @@ impl WebRenderer {
                 blend: Some(gpu::BlendState::ALPHA_BLENDING),
                 write_mask: gpu::ColorWrites::ALL,
             }],
-            multisample_state: gpu::MultisampleState::default(),
+            multisample_state: gpu::MultisampleState {
+                sample_count: MSAA_SAMPLE_COUNT,
+                ..Default::default()
+            },
         });
 
         // Create monochrome sprite instance buffer
@@ -401,7 +414,10 @@ impl WebRenderer {
                 blend: Some(gpu::BlendState::ALPHA_BLENDING),
                 write_mask: gpu::ColorWrites::ALL,
             }],
-            multisample_state: gpu::MultisampleState::default(),
+            multisample_state: gpu::MultisampleState {
+                sample_count: MSAA_SAMPLE_COUNT,
+                ..Default::default()
+            },
         });
 
         // Create polychrome sprite instance buffer
@@ -429,7 +445,10 @@ impl WebRenderer {
                 blend: Some(gpu::BlendState::ALPHA_BLENDING),
                 write_mask: gpu::ColorWrites::ALL,
             }],
-            multisample_state: gpu::MultisampleState::default(),
+            multisample_state: gpu::MultisampleState {
+                sample_count: MSAA_SAMPLE_COUNT,
+                ..Default::default()
+            },
         });
 
         // Create shadow instance buffer
@@ -457,7 +476,10 @@ impl WebRenderer {
                 blend: Some(gpu::BlendState::ALPHA_BLENDING),
                 write_mask: gpu::ColorWrites::ALL,
             }],
-            multisample_state: gpu::MultisampleState::default(),
+            multisample_state: gpu::MultisampleState {
+                sample_count: MSAA_SAMPLE_COUNT,
+                ..Default::default()
+            },
         });
 
         // Create path vertex buffer
@@ -470,6 +492,28 @@ impl WebRenderer {
         // Create texture atlas for sprites and glyphs (Arc for sharing with window)
         let atlas = Arc::new(WebGpuAtlas::new(&gpu));
 
+        // Create MSAA render target for antialiasing
+        let msaa_texture = gpu.create_texture(gpu::TextureDesc {
+            name: "msaa_target",
+            format: surface.info().format,
+            size: config.size,
+            array_layer_count: 1,
+            mip_level_count: 1,
+            sample_count: MSAA_SAMPLE_COUNT,
+            dimension: gpu::TextureDimension::D2,
+            usage: gpu::TextureUsage::TARGET,
+            external: None,
+        });
+        let msaa_view = gpu.create_texture_view(
+            msaa_texture,
+            gpu::TextureViewDesc {
+                name: "msaa_view",
+                format: surface.info().format,
+                dimension: gpu::ViewDimension::D2,
+                subresources: &gpu::TextureSubresources::default(),
+            },
+        );
+
         *self.0.borrow_mut() = Some(WebRendererState {
             gpu,
             surface,
@@ -477,6 +521,8 @@ impl WebRenderer {
             command_encoder,
             last_sync_point: None,
             drawable_size,
+            msaa_texture,
+            msaa_view,
             globals,
             globals_buffer,
             quad_pipeline,
@@ -501,12 +547,36 @@ impl WebRenderer {
     pub fn update_drawable_size(&self, size: Size<DevicePixels>) {
         if let Some(state) = self.0.borrow_mut().as_mut() {
             state.drawable_size = size;
-            state.surface_config.size = gpu::Extent {
+            let new_extent = gpu::Extent {
                 width: size.width.0 as u32,
                 height: size.height.0 as u32,
                 depth: 1,
             };
+            state.surface_config.size = new_extent;
             state.gpu.reconfigure_surface(&mut state.surface, state.surface_config.clone());
+
+            // Recreate MSAA texture with new size
+            state.gpu.destroy_texture(state.msaa_texture);
+            state.msaa_texture = state.gpu.create_texture(gpu::TextureDesc {
+                name: "msaa_target",
+                format: state.surface.info().format,
+                size: new_extent,
+                array_layer_count: 1,
+                mip_level_count: 1,
+                sample_count: MSAA_SAMPLE_COUNT,
+                dimension: gpu::TextureDimension::D2,
+                usage: gpu::TextureUsage::TARGET,
+                external: None,
+            });
+            state.msaa_view = state.gpu.create_texture_view(
+                state.msaa_texture,
+                gpu::TextureViewDesc {
+                    name: "msaa_view",
+                    format: state.surface.info().format,
+                    dimension: gpu::ViewDimension::D2,
+                    subresources: &gpu::TextureSubresources::default(),
+                },
+            );
 
             // Update globals with new viewport size
             state.globals.viewport_size = [size.width.0 as f32, size.height.0 as f32];
@@ -558,16 +628,16 @@ impl WebRenderer {
         // Begin encoding
         state.command_encoder.start();
 
-        // Get the texture view for rendering
-        let target = frame.texture_view();
+        // Get the texture view for rendering (resolve target)
+        let resolve_target = frame.texture_view();
 
-        // Main render pass
+        // Main render pass with MSAA - render to MSAA target, resolve to swapchain
         {
             let mut pass = state.command_encoder.render("main", gpu::RenderTargetSet {
                 colors: &[gpu::RenderTarget {
-                    view: target,
+                    view: state.msaa_view,
                     init_op: gpu::InitOp::Clear(gpu::TextureColor::TransparentBlack),
-                    finish_op: gpu::FinishOp::Store,
+                    finish_op: gpu::FinishOp::ResolveTo(resolve_target),
                 }],
                 depth_stencil: None,
             });
@@ -1208,16 +1278,16 @@ impl WebRenderer {
         // Begin encoding
         state.command_encoder.start();
 
-        // Get the texture view for rendering
-        let target = frame.texture_view();
+        // Get the texture view for rendering (resolve target)
+        let resolve_target = frame.texture_view();
 
-        // Main render pass
+        // Main render pass with MSAA
         {
             let mut pass = state.command_encoder.render("main", gpu::RenderTargetSet {
                 colors: &[gpu::RenderTarget {
-                    view: target,
+                    view: state.msaa_view,
                     init_op: gpu::InitOp::Clear(gpu::TextureColor::OpaqueBlack),
-                    finish_op: gpu::FinishOp::Store,
+                    finish_op: gpu::FinishOp::ResolveTo(resolve_target),
                 }],
                 depth_stencil: None,
             });
@@ -1399,15 +1469,15 @@ impl WebRenderer {
 
         // Begin encoding
         state.command_encoder.start();
-        let target = frame.texture_view();
+        let resolve_target = frame.texture_view();
 
-        // Main render pass
+        // Main render pass with MSAA
         {
             let mut pass = state.command_encoder.render("main", gpu::RenderTargetSet {
                 colors: &[gpu::RenderTarget {
-                    view: target,
+                    view: state.msaa_view,
                     init_op: gpu::InitOp::Clear(gpu::TextureColor::OpaqueBlack),
-                    finish_op: gpu::FinishOp::Store,
+                    finish_op: gpu::FinishOp::ResolveTo(resolve_target),
                 }],
                 depth_stencil: None,
             });
