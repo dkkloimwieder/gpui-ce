@@ -508,15 +508,23 @@ fn fs_shadow(input: ShadowVarying) -> @location(0) vec4<f32> {
 
 // === Path Shader === //
 
-// Path vertex structure - matches Rust PathVertex layout
-// Each vertex contains position, st coords for bezier AA, and content mask
+// Path vertex structure - flattened to exactly match Rust GpuPathVertex layout
+// Total: 12 f32s = 48 bytes per vertex
 struct PathVertex {
     xy_position_x: f32,
     xy_position_y: f32,
     st_position_x: f32,
     st_position_y: f32,
-    content_mask: Bounds,
-    color: Hsla,
+    // content_mask (Bounds flattened)
+    content_mask_origin_x: f32,
+    content_mask_origin_y: f32,
+    content_mask_size_width: f32,
+    content_mask_size_height: f32,
+    // color (Hsla flattened)
+    color_h: f32,
+    color_s: f32,
+    color_l: f32,
+    color_a: f32,
 }
 
 var<storage, read> b_path_vertices: array<PathVertex>;
@@ -536,14 +544,17 @@ fn vs_path(@builtin(vertex_index) vertex_id: u32) -> PathVarying {
     // Convert to device coordinates
     let device_position = xy_position / globals.viewport_size * vec2<f32>(2.0, -2.0) + vec2<f32>(-1.0, 1.0);
 
+    // Create Hsla for color conversion
+    let hsla = Hsla(v.color_h, v.color_s, v.color_l, v.color_a);
+
     var out = PathVarying();
     out.position = vec4<f32>(device_position, 0.0, 1.0);
     out.st_position = vec2<f32>(v.st_position_x, v.st_position_y);
-    out.color = hsla_to_rgba(v.color);
+    out.color = hsla_to_rgba(hsla);
 
     // Clip distances for content mask
-    let clip_origin = vec2<f32>(v.content_mask.origin_x, v.content_mask.origin_y);
-    let clip_size = vec2<f32>(v.content_mask.size_width, v.content_mask.size_height);
+    let clip_origin = vec2<f32>(v.content_mask_origin_x, v.content_mask_origin_y);
+    let clip_size = vec2<f32>(v.content_mask_size_width, v.content_mask_size_height);
     let tl = xy_position - clip_origin;
     let br = clip_origin + clip_size - xy_position;
     out.clip_distances = vec4<f32>(tl.x, br.x, tl.y, br.y);
@@ -558,20 +569,6 @@ fn fs_path(input: PathVarying) -> @location(0) vec4<f32> {
         return vec4<f32>(0.0);
     }
 
-    // Quadratic bezier anti-aliasing using st coordinates
-    let dx = dpdx(input.st_position);
-    let dy = dpdy(input.st_position);
-
-    var alpha: f32;
-    if (length(vec2<f32>(dx.x, dy.x)) < 0.001) {
-        // If the gradient is too small, return a solid color
-        alpha = 1.0;
-    } else {
-        let gradient = 2.0 * input.st_position.xx * vec2<f32>(dx.x, dy.x) - vec2<f32>(dx.y, dy.y);
-        let f = input.st_position.x * input.st_position.x - input.st_position.y;
-        let distance = f / length(gradient);
-        alpha = saturate(0.5 - distance);
-    }
-
-    return blend_color(input.color, alpha);
+    // Simple solid fill - just use the path color directly
+    return blend_color(input.color, 1.0);
 }

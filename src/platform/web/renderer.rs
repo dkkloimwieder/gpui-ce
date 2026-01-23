@@ -842,8 +842,9 @@ impl WebRenderer {
 
             for path in paths {
                 // Get the path's color from the Background struct
-                // Background always has a solid color field
                 let color = path.color.solid;
+                // Use path's content_mask, not vertex's (vertex content_mask is default/empty)
+                let content_mask = &path.content_mask;
 
                 for vertex in &path.vertices {
                     if vertex_index >= count {
@@ -855,10 +856,11 @@ impl WebRenderer {
                         xy_position_y: vertex.xy_position.y.0,
                         st_position_x: vertex.st_position.x,
                         st_position_y: vertex.st_position.y,
-                        content_mask_origin_x: vertex.content_mask.bounds.origin.x.0,
-                        content_mask_origin_y: vertex.content_mask.bounds.origin.y.0,
-                        content_mask_size_width: vertex.content_mask.bounds.size.width.0,
-                        content_mask_size_height: vertex.content_mask.bounds.size.height.0,
+                        // Use path's content_mask instead of vertex's
+                        content_mask_origin_x: content_mask.bounds.origin.x.0,
+                        content_mask_origin_y: content_mask.bounds.origin.y.0,
+                        content_mask_size_width: content_mask.bounds.size.width.0,
+                        content_mask_size_height: content_mask.bounds.size.height.0,
                         color_h: color.h,
                         color_s: color.s,
                         color_l: color.l,
