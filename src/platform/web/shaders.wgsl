@@ -572,3 +572,127 @@ fn fs_path(input: PathVarying) -> @location(0) vec4<f32> {
     // Simple solid fill - just use the path color directly
     return blend_color(input.color, 1.0);
 }
+
+// === Underline Shader === //
+
+struct Underline {
+    order: u32,
+    pad: u32,
+    bounds: Bounds,
+    content_mask: Bounds,
+    color: Hsla,
+    thickness: f32,
+    wavy: u32,
+}
+
+var<storage, read> b_underlines: array<Underline>;
+
+struct UnderlineVarying {
+    @builtin(position) position: vec4<f32>,
+    @location(0) @interpolate(flat) color: vec4<f32>,
+    @location(1) clip_distances: vec4<f32>,
+}
+
+// Wavy underline parameters
+const WAVE_AMPLITUDE: f32 = 1.5;  // Wave height in pixels
+const WAVE_PERIOD: f32 = 6.0;     // Wave period in pixels
+
+@vertex
+fn vs_underline(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) instance_id: u32) -> UnderlineVarying {
+    // For wavy underlines, we use more vertices to create the wave shape
+    // Triangle strip with 4 vertices creates a quad
+    let unit_vertex = vec2<f32>(f32(vertex_id & 1u), 0.5 * f32(vertex_id & 2u));
+    let underline = b_underlines[instance_id];
+
+    // Calculate base position within bounds
+    var bounds = underline.bounds;
+
+    // For wavy underlines, expand vertical bounds to accommodate wave
+    if (underline.wavy != 0u) {
+        bounds.origin_y -= WAVE_AMPLITUDE;
+        bounds.size_height = underline.thickness + 2.0 * WAVE_AMPLITUDE;
+    } else {
+        // Straight underline: use exact thickness
+        bounds.size_height = underline.thickness;
+    }
+
+    var out = UnderlineVarying();
+    out.position = to_device_position(unit_vertex, bounds);
+    out.color = hsla_to_rgba(underline.color);
+    out.clip_distances = distance_from_clip_rect(unit_vertex, bounds, underline.content_mask);
+    return out;
+}
+
+@fragment
+fn fs_underline(input: UnderlineVarying) -> @location(0) vec4<f32> {
+    // Alpha clip first
+    if (any(input.clip_distances < vec4<f32>(0.0))) {
+        return vec4<f32>(0.0);
+    }
+
+    return blend_color(input.color, 1.0);
+}
+
+// Wavy underline with more detailed geometry
+// Uses multiple segments to render a proper sine wave
+struct WavyUnderlineVarying {
+    @builtin(position) position: vec4<f32>,
+    @location(0) @interpolate(flat) color: vec4<f32>,
+    @location(1) @interpolate(flat) underline_id: u32,
+    @location(2) local_pos: vec2<f32>,  // Position within underline bounds
+    @location(3) clip_distances: vec4<f32>,
+}
+
+@vertex
+fn vs_underline_wavy(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) instance_id: u32) -> WavyUnderlineVarying {
+    let unit_vertex = vec2<f32>(f32(vertex_id & 1u), 0.5 * f32(vertex_id & 2u));
+    let underline = b_underlines[instance_id];
+
+    // Expand bounds to accommodate wave amplitude
+    var bounds = underline.bounds;
+    bounds.origin_y -= WAVE_AMPLITUDE;
+    bounds.size_height = underline.thickness + 2.0 * WAVE_AMPLITUDE;
+
+    let origin = vec2<f32>(bounds.origin_x, bounds.origin_y);
+    let size = vec2<f32>(bounds.size_width, bounds.size_height);
+    let local_pos = unit_vertex * size;
+
+    var out = WavyUnderlineVarying();
+    out.position = to_device_position(unit_vertex, bounds);
+    out.color = hsla_to_rgba(underline.color);
+    out.underline_id = instance_id;
+    out.local_pos = local_pos;
+    out.clip_distances = distance_from_clip_rect(unit_vertex, bounds, underline.content_mask);
+    return out;
+}
+
+@fragment
+fn fs_underline_wavy(input: WavyUnderlineVarying) -> @location(0) vec4<f32> {
+    // Alpha clip first
+    if (any(input.clip_distances < vec4<f32>(0.0))) {
+        return vec4<f32>(0.0);
+    }
+
+    let underline = b_underlines[input.underline_id];
+
+    // Calculate wave at this x position
+    let x = input.local_pos.x;
+    let wave_center = WAVE_AMPLITUDE + sin(x * 2.0 * M_PI_F / WAVE_PERIOD) * WAVE_AMPLITUDE;
+
+    // Distance from wave center line
+    let y = input.local_pos.y;
+    let dist_from_wave = abs(y - wave_center);
+
+    // Antialiased edge - thickness/2 is the radius from center
+    let half_thickness = underline.thickness / 2.0;
+    let edge = half_thickness - dist_from_wave;
+
+    // Smooth edge with 1 pixel feather
+    let alpha = saturate(edge + 0.5);
+
+    if (alpha <= 0.0) {
+        return vec4<f32>(0.0);
+    }
+
+    return blend_color(input.color, alpha);
+}

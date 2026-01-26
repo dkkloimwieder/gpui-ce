@@ -20,7 +20,7 @@ use blade_graphics as gpu;
 use std::{mem, ptr};
 
 #[cfg(target_arch = "wasm32")]
-use crate::scene::{Quad, MonochromeSprite, PolychromeSprite, Shadow, Path};
+use crate::scene::{Quad, MonochromeSprite, PolychromeSprite, Shadow, Path, Underline};
 
 #[cfg(target_arch = "wasm32")]
 use super::web_atlas::WebGpuAtlas;
@@ -69,6 +69,14 @@ struct ShaderPathsData {
     b_path_vertices: gpu::BufferPiece,
 }
 
+/// Shader data layout for underline rendering
+#[cfg(target_arch = "wasm32")]
+#[derive(blade_macros::ShaderData)]
+struct ShaderUnderlinesData {
+    globals: GlobalParams,
+    b_underlines: gpu::BufferPiece,
+}
+
 /// GPU-side path vertex structure.
 /// Must match PathVertex in shaders.wgsl exactly.
 #[cfg(target_arch = "wasm32")]
@@ -106,6 +114,10 @@ const MAX_SHADOWS_PER_BATCH: usize = 4096;
 /// Maximum number of path vertices per batch
 #[cfg(target_arch = "wasm32")]
 const MAX_PATH_VERTICES_PER_BATCH: usize = 65536;
+
+/// Maximum number of underlines per batch
+#[cfg(target_arch = "wasm32")]
+const MAX_UNDERLINES_PER_BATCH: usize = 4096;
 
 /// Global parameters passed to all shaders.
 ///
@@ -204,6 +216,12 @@ pub struct WebRendererState {
     pub path_pipeline: gpu::RenderPipeline,
     /// Buffer for path vertex data
     pub path_buffer: gpu::Buffer,
+    /// Underline render pipeline (straight)
+    pub underline_pipeline: gpu::RenderPipeline,
+    /// Underline render pipeline (wavy)
+    pub underline_wavy_pipeline: gpu::RenderPipeline,
+    /// Buffer for underline instance data
+    pub underline_buffer: gpu::Buffer,
     /// Sampler for atlas textures
     pub atlas_sampler: gpu::Sampler,
     /// Texture atlas for sprites/glyphs (Arc for sharing with window)
@@ -489,6 +507,60 @@ impl WebRenderer {
             memory: gpu::Memory::Shared,
         });
 
+        // Create underline render pipeline (straight)
+        let underline_layout = <ShaderUnderlinesData as gpu::ShaderData>::layout();
+        let underline_pipeline = gpu.create_render_pipeline(gpu::RenderPipelineDesc {
+            name: "underlines",
+            data_layouts: &[&underline_layout],
+            vertex: shader.at("vs_underline"),
+            vertex_fetches: &[],
+            fragment: Some(shader.at("fs_underline")),
+            primitive: gpu::PrimitiveState {
+                topology: gpu::PrimitiveTopology::TriangleStrip,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            color_targets: &[gpu::ColorTargetState {
+                format: surface.info().format,
+                blend: Some(gpu::BlendState::ALPHA_BLENDING),
+                write_mask: gpu::ColorWrites::ALL,
+            }],
+            multisample_state: gpu::MultisampleState {
+                sample_count: MSAA_SAMPLE_COUNT,
+                ..Default::default()
+            },
+        });
+
+        // Create underline render pipeline (wavy)
+        let underline_wavy_pipeline = gpu.create_render_pipeline(gpu::RenderPipelineDesc {
+            name: "underlines_wavy",
+            data_layouts: &[&underline_layout],
+            vertex: shader.at("vs_underline_wavy"),
+            vertex_fetches: &[],
+            fragment: Some(shader.at("fs_underline_wavy")),
+            primitive: gpu::PrimitiveState {
+                topology: gpu::PrimitiveTopology::TriangleStrip,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            color_targets: &[gpu::ColorTargetState {
+                format: surface.info().format,
+                blend: Some(gpu::BlendState::ALPHA_BLENDING),
+                write_mask: gpu::ColorWrites::ALL,
+            }],
+            multisample_state: gpu::MultisampleState {
+                sample_count: MSAA_SAMPLE_COUNT,
+                ..Default::default()
+            },
+        });
+
+        // Create underline instance buffer
+        let underline_buffer = gpu.create_buffer(gpu::BufferDesc {
+            name: "underlines",
+            size: (mem::size_of::<Underline>() * MAX_UNDERLINES_PER_BATCH) as u64,
+            memory: gpu::Memory::Shared,
+        });
+
         // Create texture atlas for sprites and glyphs (Arc for sharing with window)
         let atlas = Arc::new(WebGpuAtlas::new(&gpu));
 
@@ -535,6 +607,9 @@ impl WebRenderer {
             shadow_buffer,
             path_pipeline,
             path_buffer,
+            underline_pipeline,
+            underline_wavy_pipeline,
+            underline_buffer,
             atlas_sampler,
             atlas,
         });
@@ -650,6 +725,7 @@ impl WebRenderer {
             let mut poly_sprite_buffer_offset: u64 = 0;
             let mut shadow_buffer_offset: u64 = 0;
             let mut path_buffer_offset: u64 = 0;
+            let mut underline_buffer_offset: u64 = 0;
 
             for batch in scene.batches() {
                 match batch {
@@ -725,7 +801,20 @@ impl WebRenderer {
                         );
                         path_buffer_offset = new_offset;
                     }
-                    // TODO: Other primitive types (underlines, surfaces)
+                    PrimitiveBatch::Underlines(underlines) => {
+                        let new_offset = Self::draw_underlines_internal(
+                            &mut pass,
+                            underlines,
+                            underline_buffer_offset,
+                            &state.globals,
+                            state.underline_buffer,
+                            &state.underline_pipeline,
+                            &state.underline_wavy_pipeline,
+                            &state.gpu,
+                        );
+                        underline_buffer_offset = new_offset;
+                    }
+                    // TODO: Surfaces primitive type
                     _ => {}
                 }
             }
@@ -1085,6 +1174,125 @@ impl WebRenderer {
         // Return the new offset for the next batch, aligned to storage buffer alignment
         let next_offset = buffer_offset + data_size;
         (next_offset + Self::STORAGE_BUFFER_ALIGNMENT - 1) & !(Self::STORAGE_BUFFER_ALIGNMENT - 1)
+    }
+
+    /// Internal helper to draw underlines during a render pass
+    /// Returns the new buffer offset for the next batch
+    #[cfg(target_arch = "wasm32")]
+    fn draw_underlines_internal(
+        pass: &mut gpu::RenderCommandEncoder,
+        underlines: &[Underline],
+        buffer_offset: u64,
+        globals: &GlobalParams,
+        underline_buffer: gpu::Buffer,
+        straight_pipeline: &gpu::RenderPipeline,
+        wavy_pipeline: &gpu::RenderPipeline,
+        gpu: &gpu::Context,
+    ) -> u64 {
+        if underlines.is_empty() {
+            return buffer_offset;
+        }
+
+        // Separate straight and wavy underlines for different pipelines
+        let straight: Vec<_> = underlines.iter().filter(|u| u.wavy == 0).cloned().collect();
+        let wavy: Vec<_> = underlines.iter().filter(|u| u.wavy != 0).cloned().collect();
+
+        let mut current_offset = buffer_offset;
+        let underline_size = mem::size_of::<Underline>() as u64;
+
+        // Draw straight underlines
+        if !straight.is_empty() {
+            let count = straight.len().min(MAX_UNDERLINES_PER_BATCH);
+            let data_size = count as u64 * underline_size;
+
+            // Check if we have room in the buffer
+            let max_offset = (MAX_UNDERLINES_PER_BATCH as u64) * underline_size;
+            if current_offset + data_size > max_offset {
+                log::warn!("Underline buffer overflow! offset={}, size={}, max={}",
+                    current_offset, data_size, max_offset);
+                return current_offset;
+            }
+
+            log::debug!(
+                "draw_underlines_internal: drawing {} straight underlines at offset {}",
+                count, current_offset
+            );
+
+            // Upload underline data to buffer
+            unsafe {
+                let dst = (underline_buffer.data() as *mut u8).add(current_offset as usize) as *mut Underline;
+                ptr::copy_nonoverlapping(straight.as_ptr(), dst, count);
+            }
+            gpu.sync_buffer_range(underline_buffer, current_offset, data_size);
+
+            // Bind pipeline and data
+            let mut encoder = pass.with(straight_pipeline);
+            encoder.bind(
+                0,
+                &ShaderUnderlinesData {
+                    globals: *globals,
+                    b_underlines: gpu::BufferPiece {
+                        buffer: underline_buffer,
+                        offset: current_offset,
+                    },
+                },
+            );
+
+            // Draw instanced underlines (4 vertices per underline, N instances)
+            encoder.draw(0, 4, 0, count as u32);
+
+            // Update offset for next batch
+            let next_offset = current_offset + data_size;
+            current_offset = (next_offset + Self::STORAGE_BUFFER_ALIGNMENT - 1) & !(Self::STORAGE_BUFFER_ALIGNMENT - 1);
+        }
+
+        // Draw wavy underlines
+        if !wavy.is_empty() {
+            let count = wavy.len().min(MAX_UNDERLINES_PER_BATCH);
+            let data_size = count as u64 * underline_size;
+
+            // Check if we have room in the buffer
+            let max_offset = (MAX_UNDERLINES_PER_BATCH as u64) * underline_size;
+            if current_offset + data_size > max_offset {
+                log::warn!("Underline buffer overflow (wavy)! offset={}, size={}, max={}",
+                    current_offset, data_size, max_offset);
+                return current_offset;
+            }
+
+            log::debug!(
+                "draw_underlines_internal: drawing {} wavy underlines at offset {}",
+                count, current_offset
+            );
+
+            // Upload underline data to buffer
+            unsafe {
+                let dst = (underline_buffer.data() as *mut u8).add(current_offset as usize) as *mut Underline;
+                ptr::copy_nonoverlapping(wavy.as_ptr(), dst, count);
+            }
+            gpu.sync_buffer_range(underline_buffer, current_offset, data_size);
+
+            // Bind pipeline and data
+            let mut encoder = pass.with(wavy_pipeline);
+            encoder.bind(
+                0,
+                &ShaderUnderlinesData {
+                    globals: *globals,
+                    b_underlines: gpu::BufferPiece {
+                        buffer: underline_buffer,
+                        offset: current_offset,
+                    },
+                },
+            );
+
+            // Draw instanced underlines (4 vertices per underline, N instances)
+            encoder.draw(0, 4, 0, count as u32);
+
+            // Update offset for next batch
+            let next_offset = current_offset + data_size;
+            current_offset = (next_offset + Self::STORAGE_BUFFER_ALIGNMENT - 1) & !(Self::STORAGE_BUFFER_ALIGNMENT - 1);
+        }
+
+        current_offset
     }
 
     /// Draw a scene (non-WASM stub)
