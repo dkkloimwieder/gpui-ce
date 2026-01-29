@@ -569,24 +569,8 @@ fn fs_path(input: PathVarying) -> @location(0) vec4<f32> {
         return vec4<f32>(0.0);
     }
 
-    // Compute screen-space derivatives for curve antialiasing
-    let dx = dpdx(input.st_position);
-    let dy = dpdy(input.st_position);
-
-    var alpha: f32;
-    if (length(vec2<f32>(dx.x, dy.x)) < 0.001) {
-        // Solid triangle (not a curve) - use full alpha
-        alpha = 1.0;
-    } else {
-        // Quadratic Bezier curve: x² = y
-        // Compute gradient and signed distance for antialiasing
-        let gradient = 2.0 * input.st_position.xx * vec2<f32>(dx.x, dy.x) - vec2<f32>(dx.y, dy.y);
-        let f = input.st_position.x * input.st_position.x - input.st_position.y;
-        let distance = f / length(gradient);
-        alpha = saturate(0.5 - distance);
-    }
-
-    return blend_color(input.color, alpha);
+    // Simple solid fill - just use the path color directly
+    return blend_color(input.color, 1.0);
 }
 
 // === Underline Shader === //
