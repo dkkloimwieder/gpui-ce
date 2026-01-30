@@ -497,6 +497,13 @@ path = "examples/legacy/window_positioning.rs"
 name = "window_shadow"
 path = "examples/legacy/window_shadow.rs"
 
+# ============================================================================
+# WASM Web Test Example
+# ============================================================================
+[[example]]
+name = "gpui-web-test"
+path = "../../examples/gpui-web-test/main.rs"
+
 [profile.dev]
 split-debuginfo = "unpacked"
 incremental = false

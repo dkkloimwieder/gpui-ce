@@ -506,10 +506,67 @@ fn fs_shadow(input: ShadowVarying) -> @location(0) vec4<f32> {
     return vec4<f32>(input.color.rgb * input.color.a, alpha);
 }
 
+// === Color Space Conversion Functions === //
+
+fn srgb_to_linear(srgb: vec3<f32>) -> vec3<f32> {
+    let cutoff = srgb < vec3<f32>(0.04045);
+    let higher = pow((srgb + vec3<f32>(0.055)) / vec3<f32>(1.055), vec3<f32>(2.4));
+    let lower = srgb / vec3<f32>(12.92);
+    return select(higher, lower, cutoff);
+}
+
+fn linear_to_srgb(linear: vec3<f32>) -> vec3<f32> {
+    let cutoff = linear < vec3<f32>(0.0031308);
+    let higher = vec3<f32>(1.055) * pow(linear, vec3<f32>(1.0 / 2.4)) - vec3<f32>(0.055);
+    let lower = linear * vec3<f32>(12.92);
+    return select(higher, lower, cutoff);
+}
+
+fn linear_to_srgba(color: vec4<f32>) -> vec4<f32> {
+    return vec4<f32>(linear_to_srgb(color.rgb), color.a);
+}
+
+fn srgba_to_linear(color: vec4<f32>) -> vec4<f32> {
+    return vec4<f32>(srgb_to_linear(color.rgb), color.a);
+}
+
+fn linear_srgb_to_oklab(color: vec4<f32>) -> vec4<f32> {
+    let l = 0.4122214708 * color.r + 0.5363325363 * color.g + 0.0514459929 * color.b;
+    let m = 0.2119034982 * color.r + 0.6806995451 * color.g + 0.1073969566 * color.b;
+    let s = 0.0883024619 * color.r + 0.2817188376 * color.g + 0.6299787005 * color.b;
+
+    let l_ = pow(l, 1.0 / 3.0);
+    let m_ = pow(m, 1.0 / 3.0);
+    let s_ = pow(s, 1.0 / 3.0);
+
+    return vec4<f32>(
+        0.2104542553 * l_ + 0.7936177850 * m_ - 0.0040720468 * s_,
+        1.9779984951 * l_ - 2.4285922050 * m_ + 0.4505937099 * s_,
+        0.0259040371 * l_ + 0.7827717662 * m_ - 0.8086757660 * s_,
+        color.a
+    );
+}
+
+fn oklab_to_linear_srgb(color: vec4<f32>) -> vec4<f32> {
+    let l_ = color.r + 0.3963377774 * color.g + 0.2158037573 * color.b;
+    let m_ = color.r - 0.1055613458 * color.g - 0.0638541728 * color.b;
+    let s_ = color.r - 0.0894841775 * color.g - 1.2914855480 * color.b;
+
+    let l = l_ * l_ * l_;
+    let m = m_ * m_ * m_;
+    let s = s_ * s_ * s_;
+
+    return vec4<f32>(
+        4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+        -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+        -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s,
+        color.a
+    );
+}
+
 // === Path Shader === //
 
 // Path vertex structure - flattened to exactly match Rust GpuPathVertex layout
-// Total: 12 f32s = 48 bytes per vertex
 struct PathVertex {
     xy_position_x: f32,
     xy_position_y: f32,
@@ -520,11 +577,35 @@ struct PathVertex {
     content_mask_origin_y: f32,
     content_mask_size_width: f32,
     content_mask_size_height: f32,
-    // color (Hsla flattened)
-    color_h: f32,
-    color_s: f32,
-    color_l: f32,
-    color_a: f32,
+    // path bounds for gradient calculation
+    bounds_origin_x: f32,
+    bounds_origin_y: f32,
+    bounds_size_width: f32,
+    bounds_size_height: f32,
+    // Background fields
+    background_tag: u32,
+    background_color_space: u32,
+    // solid color (Hsla)
+    solid_h: f32,
+    solid_s: f32,
+    solid_l: f32,
+    solid_a: f32,
+    // gradient angle
+    gradient_angle: f32,
+    // color stop 0
+    stop0_h: f32,
+    stop0_s: f32,
+    stop0_l: f32,
+    stop0_a: f32,
+    stop0_percentage: f32,
+    // color stop 1
+    stop1_h: f32,
+    stop1_s: f32,
+    stop1_l: f32,
+    stop1_a: f32,
+    stop1_percentage: f32,
+    // padding
+    pad: u32,
 }
 
 var<storage, read> b_path_vertices: array<PathVertex>;
@@ -532,8 +613,12 @@ var<storage, read> b_path_vertices: array<PathVertex>;
 struct PathVarying {
     @builtin(position) position: vec4<f32>,
     @location(0) st_position: vec2<f32>,
-    @location(1) @interpolate(flat) color: vec4<f32>,
+    @location(1) @interpolate(flat) vertex_id: u32,
     @location(2) clip_distances: vec4<f32>,
+    // Precomputed gradient colors
+    @location(3) @interpolate(flat) solid_color: vec4<f32>,
+    @location(4) @interpolate(flat) gradient_color0: vec4<f32>,
+    @location(5) @interpolate(flat) gradient_color1: vec4<f32>,
 }
 
 @vertex
@@ -544,13 +629,39 @@ fn vs_path(@builtin(vertex_index) vertex_id: u32) -> PathVarying {
     // Convert to device coordinates
     let device_position = xy_position / globals.viewport_size * vec2<f32>(2.0, -2.0) + vec2<f32>(-1.0, 1.0);
 
-    // Create Hsla for color conversion
-    let hsla = Hsla(v.color_h, v.color_s, v.color_l, v.color_a);
-
     var out = PathVarying();
     out.position = vec4<f32>(device_position, 0.0, 1.0);
     out.st_position = vec2<f32>(v.st_position_x, v.st_position_y);
-    out.color = hsla_to_rgba(hsla);
+    out.vertex_id = vertex_id;
+
+    // Prepare colors for gradient
+    let solid_hsla = Hsla(v.solid_h, v.solid_s, v.solid_l, v.solid_a);
+    out.solid_color = hsla_to_rgba(solid_hsla);
+
+    if (v.background_tag == 1u) {
+        // Linear gradient - prepare colors in the appropriate color space
+        let stop0_hsla = Hsla(v.stop0_h, v.stop0_s, v.stop0_l, v.stop0_a);
+        let stop1_hsla = Hsla(v.stop1_h, v.stop1_s, v.stop1_l, v.stop1_a);
+        var color0 = hsla_to_rgba(stop0_hsla);
+        var color1 = hsla_to_rgba(stop1_hsla);
+
+        // Convert to appropriate color space for interpolation
+        if (v.background_color_space == 0u) {
+            // sRGB - convert linear to sRGB for interpolation
+            color0 = linear_to_srgba(color0);
+            color1 = linear_to_srgba(color1);
+        } else if (v.background_color_space == 1u) {
+            // Oklab
+            color0 = linear_srgb_to_oklab(color0);
+            color1 = linear_srgb_to_oklab(color1);
+        }
+
+        out.gradient_color0 = color0;
+        out.gradient_color1 = color1;
+    } else {
+        out.gradient_color0 = vec4<f32>(0.0);
+        out.gradient_color1 = vec4<f32>(0.0);
+    }
 
     // Clip distances for content mask
     let clip_origin = vec2<f32>(v.content_mask_origin_x, v.content_mask_origin_y);
@@ -569,8 +680,60 @@ fn fs_path(input: PathVarying) -> @location(0) vec4<f32> {
         return vec4<f32>(0.0);
     }
 
-    // Simple solid fill - just use the path color directly
-    return blend_color(input.color, 1.0);
+    let v = b_path_vertices[input.vertex_id];
+
+    var color = input.solid_color;
+
+    // Handle gradient if tag == 1 (linear gradient)
+    if (v.background_tag == 1u) {
+        // Get bounds for gradient calculation
+        let bounds_origin = vec2<f32>(v.bounds_origin_x, v.bounds_origin_y);
+        let bounds_size = vec2<f32>(v.bounds_size_width, v.bounds_size_height);
+
+        // -90 degrees to match the CSS gradient angle
+        let angle = v.gradient_angle;
+        let radians = (angle % 360.0 - 90.0) * M_PI_F / 180.0;
+        var direction = vec2<f32>(cos(radians), sin(radians));
+        let stop0_percentage = v.stop0_percentage;
+        let stop1_percentage = v.stop1_percentage;
+
+        // Expand the short side to be the same as the long side
+        if (bounds_size.x > bounds_size.y) {
+            direction.y *= bounds_size.y / bounds_size.x;
+        } else {
+            direction.x *= bounds_size.x / bounds_size.y;
+        }
+
+        // Get the t value for the linear gradient with the color stop percentages
+        let half_size = bounds_size / 2.0;
+        let center = bounds_origin + half_size;
+        let center_to_point = input.position.xy - center;
+        var t = dot(center_to_point, direction) / length(direction);
+
+        // Check the direction to determine use of x or y
+        if (abs(direction.x) > abs(direction.y)) {
+            t = (t + half_size.x) / bounds_size.x;
+        } else {
+            t = (t + half_size.y) / bounds_size.y;
+        }
+
+        t = clamp((t - stop0_percentage) / (stop1_percentage - stop0_percentage), 0.0, 1.0);
+
+        // Interpolate in the appropriate color space then convert back
+        let mixed = mix(input.gradient_color0, input.gradient_color1, t);
+
+        if (v.background_color_space == 0u) {
+            // sRGB - convert back to linear
+            color = srgba_to_linear(mixed);
+        } else if (v.background_color_space == 1u) {
+            // Oklab - convert back to linear sRGB
+            color = oklab_to_linear_srgb(mixed);
+        } else {
+            color = mixed;
+        }
+    }
+
+    return blend_color(color, 1.0);
 }
 
 // === Underline Shader === //

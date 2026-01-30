@@ -77,7 +77,7 @@ struct ShaderUnderlinesData {
     b_underlines: gpu::BufferPiece,
 }
 
-/// GPU-side path vertex structure.
+/// GPU-side path vertex structure with full Background support.
 /// Must match PathVertex in shaders.wgsl exactly.
 #[cfg(target_arch = "wasm32")]
 #[derive(Clone, Copy, Debug)]
@@ -92,11 +92,35 @@ struct GpuPathVertex {
     content_mask_origin_y: f32,
     content_mask_size_width: f32,
     content_mask_size_height: f32,
-    // color as Hsla (4 f32s)
-    color_h: f32,
-    color_s: f32,
-    color_l: f32,
-    color_a: f32,
+    // path bounds for gradient calculation (4 f32s)
+    bounds_origin_x: f32,
+    bounds_origin_y: f32,
+    bounds_size_width: f32,
+    bounds_size_height: f32,
+    // Background struct fields
+    background_tag: u32,
+    background_color_space: u32,
+    // solid color (4 f32s)
+    solid_h: f32,
+    solid_s: f32,
+    solid_l: f32,
+    solid_a: f32,
+    // gradient angle
+    gradient_angle: f32,
+    // color stop 0 (5 f32s: Hsla + percentage)
+    stop0_h: f32,
+    stop0_s: f32,
+    stop0_l: f32,
+    stop0_a: f32,
+    stop0_percentage: f32,
+    // color stop 1 (5 f32s: Hsla + percentage)
+    stop1_h: f32,
+    stop1_s: f32,
+    stop1_l: f32,
+    stop1_a: f32,
+    stop1_percentage: f32,
+    // padding to align to 16-byte boundary
+    _pad: u32,
 }
 
 /// Maximum number of quads per batch
@@ -1000,10 +1024,10 @@ impl WebRenderer {
             let mut vertex_index = 0;
 
             for path in paths {
-                // Get the path's color from the Background struct
-                let color = path.color.solid;
-                // Use path's content_mask, not vertex's (vertex content_mask is default/empty)
+                // Get the full Background for gradient support
+                let background = &path.color;
                 let content_mask = &path.content_mask;
+                let bounds = &path.bounds;
 
                 for vertex in &path.vertices {
                     if vertex_index >= count {
@@ -1015,15 +1039,38 @@ impl WebRenderer {
                         xy_position_y: vertex.xy_position.y.0,
                         st_position_x: vertex.st_position.x,
                         st_position_y: vertex.st_position.y,
-                        // Use path's content_mask instead of vertex's
+                        // content_mask
                         content_mask_origin_x: content_mask.bounds.origin.x.0,
                         content_mask_origin_y: content_mask.bounds.origin.y.0,
                         content_mask_size_width: content_mask.bounds.size.width.0,
                         content_mask_size_height: content_mask.bounds.size.height.0,
-                        color_h: color.h,
-                        color_s: color.s,
-                        color_l: color.l,
-                        color_a: color.a,
+                        // path bounds for gradient calculation
+                        bounds_origin_x: bounds.origin.x.0,
+                        bounds_origin_y: bounds.origin.y.0,
+                        bounds_size_width: bounds.size.width.0,
+                        bounds_size_height: bounds.size.height.0,
+                        // background tag and color space
+                        background_tag: background.tag as u32,
+                        background_color_space: background.color_space as u32,
+                        // solid color
+                        solid_h: background.solid.h,
+                        solid_s: background.solid.s,
+                        solid_l: background.solid.l,
+                        solid_a: background.solid.a,
+                        // gradient angle
+                        gradient_angle: background.gradient_angle_or_pattern_height,
+                        // color stops
+                        stop0_h: background.colors[0].color.h,
+                        stop0_s: background.colors[0].color.s,
+                        stop0_l: background.colors[0].color.l,
+                        stop0_a: background.colors[0].color.a,
+                        stop0_percentage: background.colors[0].percentage,
+                        stop1_h: background.colors[1].color.h,
+                        stop1_s: background.colors[1].color.s,
+                        stop1_l: background.colors[1].color.l,
+                        stop1_a: background.colors[1].color.a,
+                        stop1_percentage: background.colors[1].percentage,
+                        _pad: 0,
                     };
 
                     ptr::write(dst.add(vertex_index), gpu_vertex);
