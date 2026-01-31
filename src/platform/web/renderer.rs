@@ -198,6 +198,44 @@ impl Default for WebSurfaceConfig {
 /// MSAA sample count for antialiasing (4x MSAA)
 const MSAA_SAMPLE_COUNT: u32 = 4;
 
+/// Helper to create a render pipeline with standard MSAA configuration.
+///
+/// All GPUI pipelines share the same color targets, multisample state, and depth/stencil
+/// settings. Only the name, shaders, data layout, and topology vary.
+#[cfg(target_arch = "wasm32")]
+fn create_msaa_pipeline(
+    gpu: &gpu::Context,
+    name: &str,
+    data_layout: &gpu::ShaderDataLayout,
+    shader: &gpu::Shader,
+    vs_entry: &str,
+    fs_entry: &str,
+    surface_format: gpu::TextureFormat,
+    topology: gpu::PrimitiveTopology,
+) -> gpu::RenderPipeline {
+    gpu.create_render_pipeline(gpu::RenderPipelineDesc {
+        name,
+        data_layouts: &[data_layout],
+        vertex: shader.at(vs_entry),
+        vertex_fetches: &[],
+        fragment: Some(shader.at(fs_entry)),
+        primitive: gpu::PrimitiveState {
+            topology,
+            ..Default::default()
+        },
+        depth_stencil: None,
+        color_targets: &[gpu::ColorTargetState {
+            format: surface_format,
+            blend: Some(gpu::BlendState::ALPHA_BLENDING),
+            write_mask: gpu::ColorWrites::ALL,
+        }],
+        multisample_state: gpu::MultisampleState {
+            sample_count: MSAA_SAMPLE_COUNT,
+            ..Default::default()
+        },
+    })
+}
+
 /// Web renderer state - not Send/Sync since WASM is single-threaded
 pub struct WebRendererState {
     /// GPU context (shared via Rc for atlas)
@@ -250,6 +288,40 @@ pub struct WebRendererState {
     pub atlas_sampler: gpu::Sampler,
     /// Texture atlas for sprites/glyphs (Arc for sharing with window)
     pub atlas: Arc<WebGpuAtlas>,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl WebRendererState {
+    /// Wait for previous frame and acquire a new frame.
+    ///
+    /// Returns the frame if successful, None if acquisition failed.
+    /// Also starts the command encoder for the new frame.
+    fn begin_frame(&mut self) -> Option<gpu::Frame> {
+        // Wait for previous frame
+        if let Some(ref sp) = self.last_sync_point {
+            let _ = self.gpu.wait_for(sp, 1000);
+        }
+
+        // Acquire frame
+        let frame = self.surface.acquire_frame();
+        if !frame.is_valid() {
+            log::warn!("Failed to acquire frame");
+            return None;
+        }
+
+        // Begin encoding
+        self.command_encoder.start();
+        Some(frame)
+    }
+
+    /// Present frame and submit commands.
+    ///
+    /// This should be called after all render passes are complete.
+    fn finish_frame(&mut self, frame: gpu::Frame) {
+        self.command_encoder.present(frame);
+        let sync_point = self.gpu.submit(&mut self.command_encoder);
+        self.last_sync_point = Some(sync_point);
+    }
 }
 
 /// Web renderer for GPUI
@@ -365,30 +437,15 @@ impl WebRenderer {
         let shader = gpu.create_shader(gpu::ShaderDesc {
             source: shader_source,
         });
+        let surface_format = surface.info().format;
 
         // Create quad render pipeline
         let quad_layout = <ShaderQuadsData as gpu::ShaderData>::layout();
-        let quad_pipeline = gpu.create_render_pipeline(gpu::RenderPipelineDesc {
-            name: "quads",
-            data_layouts: &[&quad_layout],
-            vertex: shader.at("vs_quad"),
-            vertex_fetches: &[],
-            fragment: Some(shader.at("fs_quad")),
-            primitive: gpu::PrimitiveState {
-                topology: gpu::PrimitiveTopology::TriangleStrip,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            color_targets: &[gpu::ColorTargetState {
-                format: surface.info().format,
-                blend: Some(gpu::BlendState::ALPHA_BLENDING),
-                write_mask: gpu::ColorWrites::ALL,
-            }],
-            multisample_state: gpu::MultisampleState {
-                sample_count: MSAA_SAMPLE_COUNT,
-                ..Default::default()
-            },
-        });
+        let quad_pipeline = create_msaa_pipeline(
+            &gpu, "quads", &quad_layout, &shader,
+            "vs_quad", "fs_quad", surface_format,
+            gpu::PrimitiveTopology::TriangleStrip,
+        );
 
         // Create quad instance buffer
         let quad_buffer = gpu.create_buffer(gpu::BufferDesc {
@@ -409,27 +466,11 @@ impl WebRenderer {
 
         // Create monochrome sprite render pipeline
         let mono_sprite_layout = <ShaderMonoSpritesData as gpu::ShaderData>::layout();
-        let mono_sprite_pipeline = gpu.create_render_pipeline(gpu::RenderPipelineDesc {
-            name: "mono_sprites",
-            data_layouts: &[&mono_sprite_layout],
-            vertex: shader.at("vs_mono_sprite"),
-            vertex_fetches: &[],
-            fragment: Some(shader.at("fs_mono_sprite")),
-            primitive: gpu::PrimitiveState {
-                topology: gpu::PrimitiveTopology::TriangleStrip,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            color_targets: &[gpu::ColorTargetState {
-                format: surface.info().format,
-                blend: Some(gpu::BlendState::ALPHA_BLENDING),
-                write_mask: gpu::ColorWrites::ALL,
-            }],
-            multisample_state: gpu::MultisampleState {
-                sample_count: MSAA_SAMPLE_COUNT,
-                ..Default::default()
-            },
-        });
+        let mono_sprite_pipeline = create_msaa_pipeline(
+            &gpu, "mono_sprites", &mono_sprite_layout, &shader,
+            "vs_mono_sprite", "fs_mono_sprite", surface_format,
+            gpu::PrimitiveTopology::TriangleStrip,
+        );
 
         // Create monochrome sprite instance buffer
         let mono_sprite_buffer = gpu.create_buffer(gpu::BufferDesc {
@@ -440,27 +481,11 @@ impl WebRenderer {
 
         // Create polychrome sprite render pipeline
         let poly_sprite_layout = <ShaderPolySpritesData as gpu::ShaderData>::layout();
-        let poly_sprite_pipeline = gpu.create_render_pipeline(gpu::RenderPipelineDesc {
-            name: "poly_sprites",
-            data_layouts: &[&poly_sprite_layout],
-            vertex: shader.at("vs_poly_sprite"),
-            vertex_fetches: &[],
-            fragment: Some(shader.at("fs_poly_sprite")),
-            primitive: gpu::PrimitiveState {
-                topology: gpu::PrimitiveTopology::TriangleStrip,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            color_targets: &[gpu::ColorTargetState {
-                format: surface.info().format,
-                blend: Some(gpu::BlendState::ALPHA_BLENDING),
-                write_mask: gpu::ColorWrites::ALL,
-            }],
-            multisample_state: gpu::MultisampleState {
-                sample_count: MSAA_SAMPLE_COUNT,
-                ..Default::default()
-            },
-        });
+        let poly_sprite_pipeline = create_msaa_pipeline(
+            &gpu, "poly_sprites", &poly_sprite_layout, &shader,
+            "vs_poly_sprite", "fs_poly_sprite", surface_format,
+            gpu::PrimitiveTopology::TriangleStrip,
+        );
 
         // Create polychrome sprite instance buffer
         let poly_sprite_buffer = gpu.create_buffer(gpu::BufferDesc {
@@ -471,27 +496,11 @@ impl WebRenderer {
 
         // Create shadow render pipeline
         let shadow_layout = <ShaderShadowsData as gpu::ShaderData>::layout();
-        let shadow_pipeline = gpu.create_render_pipeline(gpu::RenderPipelineDesc {
-            name: "shadows",
-            data_layouts: &[&shadow_layout],
-            vertex: shader.at("vs_shadow"),
-            vertex_fetches: &[],
-            fragment: Some(shader.at("fs_shadow")),
-            primitive: gpu::PrimitiveState {
-                topology: gpu::PrimitiveTopology::TriangleStrip,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            color_targets: &[gpu::ColorTargetState {
-                format: surface.info().format,
-                blend: Some(gpu::BlendState::ALPHA_BLENDING),
-                write_mask: gpu::ColorWrites::ALL,
-            }],
-            multisample_state: gpu::MultisampleState {
-                sample_count: MSAA_SAMPLE_COUNT,
-                ..Default::default()
-            },
-        });
+        let shadow_pipeline = create_msaa_pipeline(
+            &gpu, "shadows", &shadow_layout, &shader,
+            "vs_shadow", "fs_shadow", surface_format,
+            gpu::PrimitiveTopology::TriangleStrip,
+        );
 
         // Create shadow instance buffer
         let shadow_buffer = gpu.create_buffer(gpu::BufferDesc {
@@ -500,29 +509,13 @@ impl WebRenderer {
             memory: gpu::Memory::Shared,
         });
 
-        // Create path render pipeline
+        // Create path render pipeline (uses TriangleList for filled paths)
         let path_layout = <ShaderPathsData as gpu::ShaderData>::layout();
-        let path_pipeline = gpu.create_render_pipeline(gpu::RenderPipelineDesc {
-            name: "paths",
-            data_layouts: &[&path_layout],
-            vertex: shader.at("vs_path"),
-            vertex_fetches: &[],
-            fragment: Some(shader.at("fs_path")),
-            primitive: gpu::PrimitiveState {
-                topology: gpu::PrimitiveTopology::TriangleList,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            color_targets: &[gpu::ColorTargetState {
-                format: surface.info().format,
-                blend: Some(gpu::BlendState::ALPHA_BLENDING),
-                write_mask: gpu::ColorWrites::ALL,
-            }],
-            multisample_state: gpu::MultisampleState {
-                sample_count: MSAA_SAMPLE_COUNT,
-                ..Default::default()
-            },
-        });
+        let path_pipeline = create_msaa_pipeline(
+            &gpu, "paths", &path_layout, &shader,
+            "vs_path", "fs_path", surface_format,
+            gpu::PrimitiveTopology::TriangleList,
+        );
 
         // Create path vertex buffer
         let path_buffer = gpu.create_buffer(gpu::BufferDesc {
@@ -533,50 +526,18 @@ impl WebRenderer {
 
         // Create underline render pipeline (straight)
         let underline_layout = <ShaderUnderlinesData as gpu::ShaderData>::layout();
-        let underline_pipeline = gpu.create_render_pipeline(gpu::RenderPipelineDesc {
-            name: "underlines",
-            data_layouts: &[&underline_layout],
-            vertex: shader.at("vs_underline"),
-            vertex_fetches: &[],
-            fragment: Some(shader.at("fs_underline")),
-            primitive: gpu::PrimitiveState {
-                topology: gpu::PrimitiveTopology::TriangleStrip,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            color_targets: &[gpu::ColorTargetState {
-                format: surface.info().format,
-                blend: Some(gpu::BlendState::ALPHA_BLENDING),
-                write_mask: gpu::ColorWrites::ALL,
-            }],
-            multisample_state: gpu::MultisampleState {
-                sample_count: MSAA_SAMPLE_COUNT,
-                ..Default::default()
-            },
-        });
+        let underline_pipeline = create_msaa_pipeline(
+            &gpu, "underlines", &underline_layout, &shader,
+            "vs_underline", "fs_underline", surface_format,
+            gpu::PrimitiveTopology::TriangleStrip,
+        );
 
         // Create underline render pipeline (wavy)
-        let underline_wavy_pipeline = gpu.create_render_pipeline(gpu::RenderPipelineDesc {
-            name: "underlines_wavy",
-            data_layouts: &[&underline_layout],
-            vertex: shader.at("vs_underline_wavy"),
-            vertex_fetches: &[],
-            fragment: Some(shader.at("fs_underline_wavy")),
-            primitive: gpu::PrimitiveState {
-                topology: gpu::PrimitiveTopology::TriangleStrip,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            color_targets: &[gpu::ColorTargetState {
-                format: surface.info().format,
-                blend: Some(gpu::BlendState::ALPHA_BLENDING),
-                write_mask: gpu::ColorWrites::ALL,
-            }],
-            multisample_state: gpu::MultisampleState {
-                sample_count: MSAA_SAMPLE_COUNT,
-                ..Default::default()
-            },
-        });
+        let underline_wavy_pipeline = create_msaa_pipeline(
+            &gpu, "underlines_wavy", &underline_layout, &shader,
+            "vs_underline_wavy", "fs_underline_wavy", surface_format,
+            gpu::PrimitiveTopology::TriangleStrip,
+        );
 
         // Create underline instance buffer
         let underline_buffer = gpu.create_buffer(gpu::BufferDesc {
@@ -844,12 +805,7 @@ impl WebRenderer {
             }
         }
 
-        // Queue frame for presentation
-        state.command_encoder.present(frame);
-
-        // Submit
-        let sync_point = measure("      gpu_submit", || state.gpu.submit(&mut state.command_encoder));
-        state.last_sync_point = Some(sync_point);
+        state.finish_frame(frame);
     }
 
     /// WebGPU requires storage buffer offsets to be aligned to minStorageBufferOffsetAlignment (256 bytes)
@@ -1360,22 +1316,7 @@ impl WebRenderer {
             return;
         };
 
-        // Wait for previous frame
-        if let Some(ref sp) = state.last_sync_point {
-            let _ = state.gpu.wait_for(sp, 1000);
-        }
-
-        // Acquire frame
-        let frame = state.surface.acquire_frame();
-        if !frame.is_valid() {
-            log::warn!("Failed to acquire frame");
-            return;
-        }
-
-        // Begin encoding
-        state.command_encoder.start();
-
-        // Get the texture view for rendering
+        let Some(frame) = state.begin_frame() else { return };
         let target = frame.texture_view();
 
         // Render pass to clear the screen to opaque black
@@ -1390,12 +1331,7 @@ impl WebRenderer {
             });
         }
 
-        // Queue frame for presentation
-        state.command_encoder.present(frame);
-
-        // Submit
-        let sync_point = state.gpu.submit(&mut state.command_encoder);
-        state.last_sync_point = Some(sync_point);
+        state.finish_frame(frame);
     }
 
     /// Clear the screen (non-WASM stub)
@@ -1421,22 +1357,7 @@ impl WebRenderer {
             return;
         };
 
-        // Wait for previous frame
-        if let Some(ref sp) = state.last_sync_point {
-            let _ = state.gpu.wait_for(sp, 1000);
-        }
-
-        // Acquire frame
-        let frame = state.surface.acquire_frame();
-        if !frame.is_valid() {
-            log::warn!("Failed to acquire frame");
-            return;
-        }
-
-        // Begin encoding
-        state.command_encoder.start();
-
-        // Get the texture view for rendering
+        let Some(frame) = state.begin_frame() else { return };
         let target = frame.texture_view();
 
         // Render pass to clear the screen
@@ -1451,12 +1372,7 @@ impl WebRenderer {
             });
         }
 
-        // Queue frame for presentation
-        state.command_encoder.present(frame);
-
-        // Submit
-        let sync_point = state.gpu.submit(&mut state.command_encoder);
-        state.last_sync_point = Some(sync_point);
+        state.finish_frame(frame);
     }
 
     /// Clear the screen with color index (non-WASM stub)
@@ -1472,7 +1388,7 @@ impl WebRenderer {
     /// Color is specified as (h, s, l, a) where h is 0-1, s is 0-1, l is 0-1, a is 0-1.
     #[cfg(target_arch = "wasm32")]
     pub fn draw_test_quad(&self, x: f32, y: f32, w: f32, h: f32, color: [f32; 4]) {
-        use crate::{Background, Bounds, ContentMask, Corners, Edges, Hsla, ScaledPixels};
+        use crate::{Bounds, ContentMask, Corners, Edges, Hsla, ScaledPixels};
         use crate::scene::{BorderStyle, DrawOrder};
 
         let mut state_ref = self.0.borrow_mut();
@@ -1481,17 +1397,7 @@ impl WebRenderer {
             return;
         };
 
-        // Wait for previous frame
-        if let Some(ref sp) = state.last_sync_point {
-            let _ = state.gpu.wait_for(sp, 1000);
-        }
-
-        // Acquire frame
-        let frame = state.surface.acquire_frame();
-        if !frame.is_valid() {
-            log::warn!("Failed to acquire frame");
-            return;
-        }
+        let Some(frame) = state.begin_frame() else { return };
 
         // Create a test quad
         let quad = Quad {
@@ -1530,13 +1436,8 @@ impl WebRenderer {
             border_widths: Edges::default(),
         };
 
-        // Begin encoding
-        state.command_encoder.start();
-
-        // Get the texture view for rendering (resolve target)
-        let resolve_target = frame.texture_view();
-
         // Main render pass with MSAA
+        let resolve_target = frame.texture_view();
         {
             let mut pass = state.command_encoder.render("main", gpu::RenderTargetSet {
                 colors: &[gpu::RenderTarget {
@@ -1558,12 +1459,7 @@ impl WebRenderer {
             );
         }
 
-        // Queue frame for presentation
-        state.command_encoder.present(frame);
-
-        // Submit
-        let sync_point = state.gpu.submit(&mut state.command_encoder);
-        state.last_sync_point = Some(sync_point);
+        state.finish_frame(frame);
     }
 
     /// Draw a test quad (non-WASM stub)
@@ -1755,12 +1651,7 @@ impl WebRenderer {
             }
         }
 
-        // Queue frame for presentation
-        state.command_encoder.present(frame);
-
-        // Submit
-        let sync_point = state.gpu.submit(&mut state.command_encoder);
-        state.last_sync_point = Some(sync_point);
+        state.finish_frame(frame);
 
         log::info!("Drew text '{}' at ({}, {}) size {}x{}", text, x, y, text_width, text_height);
     }

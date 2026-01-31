@@ -22,9 +22,6 @@ use std::{
 };
 
 #[cfg(target_arch = "wasm32")]
-use wasm_bindgen::JsCast;
-
-#[cfg(target_arch = "wasm32")]
 use super::WebRenderer;
 
 /// Web window state

@@ -1,4 +1,6 @@
-use crate::{App, PlatformDispatcher, RunnableMeta, RunnableVariant, TaskTiming, profiler};
+use crate::{App, PlatformDispatcher, RunnableMeta, RunnableVariant};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::{TaskTiming, profiler};
 use async_task::Runnable;
 use futures::channel::mpsc;
 use parking_lot::{Condvar, Mutex};
@@ -29,6 +31,7 @@ use web_time::Instant;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
 use crate::util::TryFutureExt;
+#[cfg(any(test, feature = "test-support", not(target_arch = "wasm32")))]
 use waker_fn::waker_fn;
 
 #[cfg(any(test, feature = "test-support"))]

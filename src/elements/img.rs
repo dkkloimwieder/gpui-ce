@@ -4,9 +4,12 @@ use crate::{
     Interactivity, IntoElement, LayoutId, Length, ObjectFit, Pixels, RenderImage, Resource,
     SharedString, SharedUri, StyleRefinement, Styled, Task, Window, px,
 };
-use anyhow::{Context as _, Result};
-
-use futures::{AsyncReadExt, Future};
+use anyhow::Result;
+#[cfg(not(target_arch = "wasm32"))]
+use anyhow::Context as _;
+use futures::Future;
+#[cfg(not(target_arch = "wasm32"))]
+use futures::AsyncReadExt;
 use image::{
     AnimationDecoder, DynamicImage, Frame, ImageError, ImageFormat, Rgba,
     codecs::{gif::GifDecoder, webp::WebPDecoder},
@@ -17,10 +20,11 @@ use std::{
     io::{self, Cursor},
     ops::{Deref, DerefMut},
     path::{Path, PathBuf},
-    str::FromStr,
     sync::Arc,
     time::Duration,
 };
+#[cfg(not(target_arch = "wasm32"))]
+use std::str::FromStr;
 
 // Use web-time for WASM (provides Instant via performance.now())
 #[cfg(target_arch = "wasm32")]

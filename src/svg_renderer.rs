@@ -4,7 +4,6 @@ use crate::{
 };
 use image::Frame;
 use resvg::tiny_skia::Pixmap;
-use smallvec::SmallVec;
 use std::{
     hash::Hash,
     sync::{Arc, LazyLock},
